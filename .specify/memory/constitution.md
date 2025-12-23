@@ -1,50 +1,90 @@
-# [PROJECT_NAME] Constitution
-<!-- Example: Spec Constitution, TaskFlow Constitution, etc. -->
+# Pytest Playwright Web 测试框架 Constitution
 
 ## Core Principles
 
-### [PRINCIPLE_1_NAME]
-<!-- Example: I. Library-First -->
-[PRINCIPLE_1_DESCRIPTION]
-<!-- Example: Every feature starts as a standalone library; Libraries must be self-contained, independently testable, documented; Clear purpose required - no organizational-only libraries -->
+### I. 测试驱动设计 (Test-Driven Development)
+所有测试用例必须基于具体的业务需求编写，遵循“先编写失败的测试，再实现功能”的原则。测试用例应具有明确的断言和验证点，确保测试的可维护性和可靠性。
 
-### [PRINCIPLE_2_NAME]
-<!-- Example: II. CLI Interface -->
-[PRINCIPLE_2_DESCRIPTION]
-<!-- Example: Every library exposes functionality via CLI; Text in/out protocol: stdin/args → stdout, errors → stderr; Support JSON + human-readable formats -->
+### II. 分层架构设计
+测试框架采用分层架构：基础层（Playwright封装）、业务层（Page Object Model）、测试用例层。各层职责清晰，降低耦合度，提高代码复用性。
 
-### [PRINCIPLE_3_NAME]
-<!-- Example: III. Test-First (NON-NEGOTIABLE) -->
-[PRINCIPLE_3_DESCRIPTION]
-<!-- Example: TDD mandatory: Tests written → User approved → Tests fail → Then implement; Red-Green-Refactor cycle strictly enforced -->
+### III. 跨浏览器兼容性
+测试框架必须支持主流浏览器（Chrome、Firefox、Safari）的自动化测试，确保web应用在不同浏览器环境下的兼容性。
 
-### [PRINCIPLE_4_NAME]
-<!-- Example: IV. Integration Testing -->
-[PRINCIPLE_4_DESCRIPTION]
-<!-- Example: Focus areas requiring integration tests: New library contract tests, Contract changes, Inter-service communication, Shared schemas -->
+### IV. 数据驱动测试
+支持通过外部数据源（Excel、JSON、YAML等）驱动测试用例执行，提高测试覆盖率和效率。
 
-### [PRINCIPLE_5_NAME]
-<!-- Example: V. Observability, VI. Versioning & Breaking Changes, VII. Simplicity -->
-[PRINCIPLE_5_DESCRIPTION]
-<!-- Example: Text I/O ensures debuggability; Structured logging required; Or: MAJOR.MINOR.BUILD format; Or: Start simple, YAGNI principles -->
+### V. 报告与监控
+测试执行完成后生成详细的测试报告，包括测试结果、截图、日志等信息。支持将测试结果集成到CI/CD流程中，实现自动化监控和告警。
 
-## [SECTION_2_NAME]
-<!-- Example: Additional Constraints, Security Requirements, Performance Standards, etc. -->
+## 技术栈要求
 
-[SECTION_2_CONTENT]
-<!-- Example: Technology stack requirements, compliance standards, deployment policies, etc. -->
+### 核心技术
+- Python 3.8+：作为主要开发语言
+- Pytest：作为测试框架和执行引擎
+- Playwright：作为Web自动化测试工具
+- Page Object Model (POM)：作为测试用例的组织模式
 
-## [SECTION_3_NAME]
-<!-- Example: Development Workflow, Review Process, Quality Gates, etc. -->
+### 辅助工具
+- pytest-playwright：Pytest与Playwright的集成插件
+- pytest-html：生成HTML格式的测试报告
+- pytest-cov：代码覆盖率统计
+- allure-pytest：生成Allure格式的测试报告（可选）
+- openpyxl/yaml：数据驱动测试的数据源处理
 
-[SECTION_3_CONTENT]
-<!-- Example: Code review requirements, testing gates, deployment approval process, etc. -->
+### 开发环境
+- 支持Windows、macOS、Linux等主流操作系统
+- 使用虚拟环境管理依赖包
+- 代码遵循PEP8规范
+
+## 开发流程
+
+### 需求分析
+1. 理解测试需求，确定测试范围和测试目标
+2. 分析web应用的业务流程和关键功能点
+3. 确定测试环境和测试数据
+
+### 测试设计
+1. 设计测试用例，遵循TCID规范
+2. 设计Page Object Model，封装页面元素和操作
+3. 设计数据驱动的测试结构
+
+### 开发实现
+1. 实现Page Object类，封装页面元素和操作方法
+2. 编写测试用例，使用Pytest框架和Playwright API
+3. 配置测试环境和测试数据
+4. 实现测试报告和日志功能
+
+### 测试执行
+1. 在本地环境执行测试用例
+2. 集成到CI/CD流程中，实现自动化执行
+3. 分析测试结果，定位和修复问题
+
+### 维护与迭代
+1. 定期更新测试用例，确保与应用功能同步
+2. 优化测试框架，提高测试效率和稳定性
+3. 积累测试经验，完善测试方法和流程
 
 ## Governance
-<!-- Example: Constitution supersedes all other practices; Amendments require documentation, approval, migration plan -->
 
-[GOVERNANCE_RULES]
-<!-- Example: All PRs/reviews must verify compliance; Complexity must be justified; Use [GUIDANCE_FILE] for runtime development guidance -->
+### 代码规范
+- 遵循PEP8编码规范
+- 代码必须有适当的注释和文档
+- 使用有意义的变量名和函数名
 
-**Version**: [CONSTITUTION_VERSION] | **Ratified**: [RATIFICATION_DATE] | **Last Amended**: [LAST_AMENDED_DATE]
-<!-- Example: Version: 2.1.1 | Ratified: 2025-06-13 | Last Amended: 2025-07-16 -->
+### 测试用例规范
+- 测试用例必须具有明确的测试目标和断言
+- 测试用例之间相互独立，不依赖执行顺序
+- 测试用例必须可重复执行，不受环境影响
+
+### 版本控制
+- 使用Git进行版本控制
+- 遵循Git Flow工作流
+- 每个功能或修复必须有对应的分支和提交记录
+
+### 审核与发布
+- 所有代码变更必须经过代码审核
+- 测试框架的发布必须经过全面的回归测试
+- 发布版本遵循语义化版本规范
+
+**Version**: 1.0.0 | **Ratified**: 2025-12-23 | **Last Amended**: 2025-12-23
