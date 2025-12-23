@@ -37,7 +37,7 @@ def page(context):
     yield page
     page.close()
 
-@pytest.fixture
-def base_url():
+@pytest.fixture(scope="session")
+def custom_base_url():
     """获取基础URL"""
     return os.getenv("BASE_URL", "https://parabank.parasoft.com/parabank/index.htm")

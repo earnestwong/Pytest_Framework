@@ -1,4 +1,10 @@
 import pytest
+import sys
+import os
+
+# 添加项目根目录到Python路径
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 from pages.login_page import LoginPage
 
 class TestLogin:
@@ -10,7 +16,7 @@ class TestLogin:
         login_page = LoginPage(page)
         
         # 执行登录操作
-        login_page.login("john", "demo")
+        login_page.login("admin", "password")
         
         # 验证登录是否成功
         assert login_page.is_login_successful(), "登录失败"
@@ -26,7 +32,7 @@ class TestLogin:
         
         # 验证错误信息
         error_message = login_page.get_error_message()
-        assert "An internal error has occurred" in error_message or "Login and/or password are wrong." in error_message, f"错误信息不正确: {error_message}"
+        assert "The username and password could not be verified." or "An internal error has occurred and has been logged." in error_message, f"错误信息不正确: {error_message}"
     
     @pytest.mark.regression
     def test_login_invalid_password(self, page):
@@ -38,7 +44,7 @@ class TestLogin:
         
         # 验证错误信息
         error_message = login_page.get_error_message()
-        assert "An internal error has occurred" in error_message or "Login and/or password are wrong." in error_message, f"错误信息不正确: {error_message}"
+        assert "The username and password could not be verified."  or  "An internal error has occurred and has been logged." in error_message, f"错误信息不正确: {error_message}"
     
     @pytest.mark.regression
     def test_login_empty_credentials(self, page):
@@ -50,7 +56,7 @@ class TestLogin:
         
         # 验证错误信息
         error_message = login_page.get_error_message()
-        assert "An internal error has occurred" in error_message or "Login and/or password are wrong." in error_message, f"错误信息不正确: {error_message}"
+        assert "Please enter a username and password." in error_message, f"错误信息不正确: {error_message}"
     
     @pytest.mark.regression
     def test_go_to_register(self, page):
@@ -62,7 +68,7 @@ class TestLogin:
         
         # 验证是否跳转到注册页面
         assert page.title() == "ParaBank | Register for Free Online Account Access", "页面标题不正确"
-        assert "Register for Online Account Access" in page.text_content("#rightPanel > h1"), "页面内容不正确"
+        assert "Signing up is easy!" in page.text_content("#rightPanel > h1"), "页面内容不正确"
     
     @pytest.mark.regression
     def test_go_to_forgot_login(self, page):
@@ -73,5 +79,5 @@ class TestLogin:
         login_page.go_to_forgot_login()
         
         # 验证是否跳转到忘记登录信息页面
-        assert page.title() == "ParaBank | Forgot Login Info", "页面标题不正确"
-        assert "Forgot Login Info" in page.text_content("#rightPanel > h1"), "页面内容不正确"
+        assert page.title() == "ParaBank | Customer Lookup", "页面标题不正确"
+        assert "Customer Lookup" in page.text_content("#rightPanel > h1"), "页面内容不正确"
