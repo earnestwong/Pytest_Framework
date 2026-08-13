@@ -8,3 +8,9 @@ allure-pytest==2.13.2
 openpyxl==3.1.2
 pyyaml==6.0.1
 python-dotenv==1.0.0
+
+# 大众点评 App 采集扩展依赖
+# ADB 直连 + uiautomator2 + PaddleOCR
+pillow>=10.0.0              # 截图裁剪
+paddleocr>=2.7.0            # OCR 识别 H5 差评文本
+paddlepaddle>=2.5.0         # PaddleOCR 后端,无 GPU 用 CPU 版
