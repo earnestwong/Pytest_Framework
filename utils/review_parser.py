@@ -27,8 +27,9 @@ class ReviewParser:
         r"|^\d+小时前$"
     )
 
-    # 商家回复前缀(兼容多种格式:"商家回复:" / "XXX(商家):" / "商家(商家):")
-    MERCHANT_PAT = re.compile(r"^(?:商家回复|.+?\(商家\)|商家)\s*[:：]")
+    # 商家回复前缀(兼容多种格式:"商家回复:" / "XXX(商家):" / "XXX（商家）：" / "商家:")
+    # 括号支持全角（）和半角(),冒号支持全角：和半角:
+    MERCHANT_PAT = re.compile(r"^(?:商家回复|.+?[（(]商家[）)]|商家)\s*[:：]")
 
     # 人均价格(可能出现在评价内容首行)
     PRICE_PAT = re.compile(r"[￥¥]\s*(\d+(?:\.\d+)?)\s*/?\s*人?")
@@ -64,6 +65,7 @@ class ReviewParser:
           MuMu:用户名 → [签名] → 日期 → [人均] → 评分 → 内容
         """
         # 第1步:过滤 UI 噪声
+        # 注意:单字中文不过滤(可能是用户名如"聪"/"芳"),由 _is_username_candidate 精筛
         valid = []
         for it in text_items:
             text = it["text"].strip()
@@ -71,7 +73,7 @@ class ReviewParser:
                 continue
             if self.UI_NOISE_PAT.match(text):
                 continue
-            if len(text) <= 1:
+            if not text:
                 continue
             if text.isdigit():
                 continue
@@ -79,6 +81,15 @@ class ReviewParser:
 
         # 第2步:找所有日期节点索引(卡片锚点)
         date_idxs = [i for i, it in enumerate(valid) if self.DATE_PAT.match(it["text"])]
+
+        # 第2b步:检测第一个日期锚点之前的孤立商家回复(属于上一条评论的残余)
+        #   不归入当前卡片(避免数据错误),记录到 orphan_replies 供调用方提示
+        self.orphan_replies = []
+        if date_idxs:
+            first_d = date_idxs[0]
+            for i in range(first_d):
+                if self.MERCHANT_PAT.match(valid[i]["text"]):
+                    self.orphan_replies.append(valid[i]["text"])
 
         # 第3步:按日期锚点切分并解析每张卡片
         # 注意:MuMu 顺序下「用户名→日期」,下一张的用户名会落在当前卡片范围内,
@@ -138,21 +149,27 @@ class ReviewParser:
 
         # 1. 找用户名:
         #   真机顺序:日期 → 用户名(取 d_idx+1)
-        #   MuMu 顺序:用户名 → [签名] → 日期(日期前是签名或直接是用户名)
+        #   MuMu 顺序:用户名 → [头像/签名] → 日期(日期前可能隔头像等噪声节点)
         user_idx = -1
         if d_idx + 1 < end_idx and self._is_username_candidate(items[d_idx + 1]["text"]):
             # 真机:日期后一节点是用户名
             user_idx = d_idx + 1
             card["user"] = items[user_idx]["text"]
-        elif (d_idx - 1 >= 0 and self._is_username_candidate(items[d_idx - 1]["text"])):
-            # 日期前一节点是用户名(首张卡片,或上一张卡片已 break 跳过此节点)
-            user_idx = d_idx - 1
-            card["user"] = items[user_idx]["text"]
-        elif (d_idx - 2 >= 0 and self.USER_SIG_PAT.match(items[d_idx - 1]["text"])
-              and self._is_username_candidate(items[d_idx - 2]["text"])):
-            # MuMu:日期前是签名,签名前是用户名
-            user_idx = d_idx - 2
-            card["user"] = items[user_idx]["text"]
+        else:
+            # MuMu:向前扫描(最多3个节点),跳过头像/签名等噪声,找用户名候选
+            for back in range(1, min(4, d_idx + 1)):
+                prev_text = items[d_idx - back]["text"]
+                if self._is_username_candidate(prev_text):
+                    user_idx = d_idx - back
+                    card["user"] = prev_text
+                    break
+                # 遇到头像/签名等可跳过的噪声,继续向前
+                if (prev_text in self.UI_NOISE
+                        or self.USER_SIG_PAT.match(prev_text)
+                        or self.UI_NOISE_PAT.match(prev_text)):
+                    continue
+                # 遇到其他非噪声文本(如上一条评论的内容/商家回复),停止
+                break
 
         # 2. 从日期向后扫描找评分/人均/商家回复/内容
         score_found = False

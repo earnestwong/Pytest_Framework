@@ -229,29 +229,47 @@ def main():
         # 3. 结构化解析(记录新增数,用于判断是否滑到底)
         cards = parser.parse(text_items)
 
+        # 检测孤立商家回复(第一个日期锚点之前,属于上一条评论的残余)
+        if hasattr(parser, "orphan_replies") and parser.orphan_replies:
+            for reply in parser.orphan_replies:
+                print(f"  [商家回复] 屏幕上方残余商家回复(属于上一条评论,如上一屏已采集则正常): {reply[:40]}...")
+
         # 3a. 用户名缺失补救:滑动过快可能导致用户名滚出上边界未被抓到
-        #     若有空用户名的卡片,往下滑一点(ratio 0.1, 800ms)重新抓取用户名
+        #     强制多次小幅下滑,直到获取用户名或达到最大重试次数(不保存空用户名)
         missing_user = [c for c in cards if not c.get("user", "").strip()]
         if missing_user:
-            print(f"  [补救] {len(missing_user)} 条评论用户名缺失,往下滑重新抓取")
+            max_retries = 5  # 最大重试次数,每次下滑 ratio 0.08
             w, h = adb.get_screen_size()
-            y1 = int(h * 0.5)
-            y2 = int(h * 0.6)  # 往下滑 10%,把上方滚出的用户名露出来
-            adb.swipe(w // 2, y1, w // 2, y2, duration_ms=800, human=False)
-            adb.human_delay(1.0, 1.5)
-            # 重新 dump + 提取 + 解析
-            xml_str = adb.dump_ui()
-            new_items = adb.extract_all_text(xml_str, min_len=1)
-            new_cards = parser.parse(new_items)
-            # 按 date + content前20 匹配,补全用户名
-            for old_card in missing_user:
-                old_key = f"{old_card.get('date', '')}|{old_card.get('content', '')[:20]}"
-                for new_card in new_cards:
-                    new_key = f"{new_card.get('date', '')}|{new_card.get('content', '')[:20]}"
-                    if new_key == old_key and new_card.get("user", "").strip():
-                        old_card["user"] = new_card["user"]
-                        print(f"  [补救] 补全用户名: [{new_card['user']}] {old_card['date']}")
-                        break
+            for retry in range(max_retries):
+                still_missing = [c for c in missing_user if not c.get("user", "").strip()]
+                if not still_missing:
+                    break
+                print(f"  [补救] 第{retry+1}/{max_retries}次: {len(still_missing)} 条评论用户名缺失,往下滑重新抓取")
+                y1 = int(h * 0.5)
+                y2 = int(h * 0.58)  # 往下滑 8%,把上方滚出的用户名露出来
+                adb.swipe(w // 2, y1, w // 2, y2, duration_ms=800, human=False)
+                adb.human_delay(1.0, 1.5)
+                # 重新 dump + 提取 + 解析
+                retry_xml = adb.dump_ui()
+                new_items = adb.extract_all_text(retry_xml, min_len=1)
+                new_cards = parser.parse(new_items)
+                # 按 date + content前20 匹配,补全用户名
+                for old_card in still_missing:
+                    if old_card.get("user", "").strip():
+                        continue
+                    old_key = f"{old_card.get('date', '')}|{old_card.get('content', '')[:20]}"
+                    for new_card in new_cards:
+                        new_key = f"{new_card.get('date', '')}|{new_card.get('content', '')[:20]}"
+                        if new_key == old_key and new_card.get("user", "").strip():
+                            old_card["user"] = new_card["user"]
+                            print(f"  [补救] 补全用户名: [{new_card['user']}] {old_card['date']}")
+                            break
+            # 重试结束后仍缺失的,打印警告(不保存空用户名,跳过该条)
+            final_missing = [c for c in missing_user if not c.get("user", "").strip()]
+            if final_missing:
+                print(f"  [补救] {len(final_missing)} 条评论经{max_retries}次重试仍未获取用户名,跳过(不保存空用户名)")
+                for c in final_missing:
+                    c["_skip_empty_user"] = True  # 标记跳过
 
         # 3b. 商家回复日期获取:有商家回复的卡片,点击进入详情页获取回复日期
         #     与误入详情页检测不冲突:本步骤主动进入→获取→back()退出,下一屏循环开始时已在列表页
@@ -266,7 +284,7 @@ def main():
             y_max = int(screen_h * 0.90)  # 底部 10% 为"回复"按钮区域,过滤
             for card in cards_with_reply:
                 reply_text = card["merchant_reply"]
-                prefix_m = re.match(r'^(?:商家回复|.+?\(商家\)|商家)\s*[:：]\s*', reply_text)
+                prefix_m = re.match(r'^(?:商家回复|.+?[（(]商家[）)]|商家)\s*[:：]\s*', reply_text)
                 # 1. 优先:搜索"XX(商家)"标签节点(小而明确,点击稳定)
                 candidates = [b for b in adb.find_elements_by_text(xml_str, "商家")
                               if ("（商家）" in b["text"] or "(商家)" in b["text"])
@@ -305,16 +323,19 @@ def main():
                 if not entered:
                     print(f"  [商家回复] 所有候选均未进入详情页,跳过本条")
 
+        # 过滤掉标记跳过的卡片(空用户名且重试失败)
+        valid_cards = [c for c in cards if not c.get("_skip_empty_user")]
+        skipped = len(cards) - len(valid_cards)
         before = len(summarizer.cards)
-        result = {"cards": cards, "review_count": len(cards), "source": "native"}
+        result = {"cards": valid_cards, "review_count": len(valid_cards), "source": "native"}
         summarizer.add(result)
         after = len(summarizer.cards)
         new_count = after - before
-        print(f"  [评价] 本屏 {len(cards)} 条,新增 {new_count} 条")
+        print(f"  [评价] 本屏 {len(valid_cards)} 条,新增 {new_count} 条" + (f"(跳过{skipped}条空用户名)" if skipped else ""))
         # 增量写入:新增的卡片立即写入 CSV(去重后的新卡片在 summarizer.cards[before:after])
         for card in summarizer.cards[before:after]:
             csv_exporter.write_card(card)
-        for card in cards:
+        for card in valid_cards:
             price_tag = f" 人均¥{card['avg_price']}" if card.get("avg_price") else ""
             print(f"    [{card['user']}] {card['date']} {card['score']}{price_tag}")
             print(f"      内容: {card['content'][:60]}...")
