@@ -4,17 +4,22 @@
 不依赖 PaddleOCR,无需 GPU,启动快
 
 用法:
-    python collect_native.py
-    python collect_native.py --shop 丰裕生煎 --scroll 10
-    python collect_native.py --device 127.0.0.1:16384 --scroll 5
+    python collect_native.py --shop "丰裕（淮海店）" --org-code "080501"
+    python collect_native.py --shop "丰裕（淮海店）" --org-code "080501" --scroll 10
+    python collect_native.py --shop "丰裕（淮海店）" --org-code "080501" --device 127.0.0.1:16384
+
+配置文件:
+    dianping_config.json 存放环境相关参数(adb路径/输出目录等),
+    同事按本机环境修改即可,命令行参数优先级高于配置文件。
 
 前置条件:
-    1. MuMu 模拟器已启动,大众点评 App 已登录
+    1. 安卓设备已连接(USB 真机或 MuMu 模拟器),大众点评 App 已登录
     2. 已进入目标店铺差评列表页(筛选好差评)
     3. ADB 端口已连通(adb connect 127.0.0.1:16384)
 """
 import sys
 import os
+import json
 import argparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -24,30 +29,48 @@ from utils.review_parser import ReviewParser
 from utils.review_summarizer import ReviewSummarizer
 from utils.csv_exporter import CSVExporter
 
-# 默认配置(可通过命令行参数覆盖)
-# adb 路径:同事使用时,请把此变量改为本机 adb.exe 的完整路径
-# (例如 MuMu 自带 adb:C:\Program Files\Netease\MuMu\nx_main\adb.exe)
-# 或将 adb 加入系统 PATH 后保持 "adb" 不变
-DEFAULT_ADB_PATH = r"C:\Program Files\Netease\MuMu\nx_main\adb.exe"
-# 留空=自动选首个 USB 真机;MuMu 模拟器填 127.0.0.1:16384
-DEFAULT_DEVICE = ""
-DEFAULT_SCROLL = 0  # 0=无限滑动,连续3屏无新评价则停
-DEFAULT_RATIO = 0.38  # 滑动比例(配合 700ms 慢速滑动)
+# 配置文件路径(与本脚本同目录)
+CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dianping_config.json")
+
+
+def load_config() -> dict:
+    """加载 dianping_config.json,文件不存在则用内置默认值"""
+    defaults = {
+        "adb_path": "adb",
+        "device": "",
+        "swipe_mode": "auto",
+        "scroll": 0,
+        "ratio": 0.38,
+        "output_dir": "reports/dianping",
+        "captcha_screenshot_dir": "screenshots/captcha",
+    }
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            defaults.update(cfg)
+        except Exception as e:
+            print(f"[配置] 读取 {CONFIG_PATH} 失败({e}),使用内置默认值")
+    return defaults
 
 
 def parse_args():
+    cfg = load_config()
     p = argparse.ArgumentParser(description="大众点评差评采集 - 原生文本直读")
     p.add_argument("--shop", required=True, help="店铺名(必填,用于报告文件名 + store_name 列)")
     p.add_argument("--org-code", required=True, dest="org_code",
                    help="机构编码(必填,写入 org_code 列,与 store_name 一致)")
-    p.add_argument("--scroll", type=int, default=DEFAULT_SCROLL,
-                   help="滑动采集屏数(0=无限滑动,连续3屏无新评价则停)")
-    p.add_argument("--device", default=DEFAULT_DEVICE,
+    p.add_argument("--scroll", type=int, default=cfg["scroll"],
+                   help=f"滑动采集屏数(0=无限滑动,到底则停),默认 {cfg['scroll']}")
+    p.add_argument("--device", default=cfg["device"],
                    help="ADB 设备地址(留空=自动选首个 USB 真机;MuMu 填 127.0.0.1:16384)")
-    p.add_argument("--adb-path", default=DEFAULT_ADB_PATH, help="adb.exe 路径")
-    p.add_argument("--ratio", type=float, default=DEFAULT_RATIO, help="滑动距离比例")
-    p.add_argument("--swipe-mode", default="auto",
+    p.add_argument("--adb-path", default=cfg["adb_path"], help="adb.exe 路径")
+    p.add_argument("--ratio", type=float, default=cfg["ratio"],
+                   help=f"滑动距离比例,默认 {cfg['ratio']}")
+    p.add_argument("--swipe-mode", default=cfg["swipe_mode"],
                    help="滑动方式:auto(根据设备自动) | swipe(真机) | roll(MuMu)")
+    p.add_argument("--output-dir", default=cfg["output_dir"],
+                   help="CSV/JSON 报告输出目录")
     return p.parse_args()
 
 
@@ -101,6 +124,18 @@ def main():
         if FOLD_HINT in xml_str:
             print(f"  [到底] 识别到'{FOLD_HINT}'提示,评论列表已到底")
             break
+
+        # 1b. 详情页检测:滑动后可能误进评论详情页(网络卡顿/列表项误触)
+        #     详情页特征:同时有评论评分 + 店铺星级卡片,复用本次 dump 不额外消耗
+        if adb.detect_review_detail_page(xml_str):
+            print("  [详情页] 误进评论详情页,执行返回回到列表页")
+            adb.back()
+            adb.human_delay(1.0, 1.5)
+            # 返回后重新 dump 作为后续操作的基准
+            xml_str = adb.dump_ui()
+            if FOLD_HINT in xml_str:
+                print(f"  [到底] 返回后识别到'{FOLD_HINT}'提示,评论列表已到底")
+                break
 
         # 1b. 滑动验证码检测(反扒随机弹出,复用本次 dump 不额外消耗)
         try:
@@ -242,7 +277,7 @@ def main():
     print(f"采集通道: 原生 {summary['source_stats']['native']} 屏")
 
     # JSON 报告
-    json_path = summarizer.save(shop_name=args.shop)
+    json_path = summarizer.save(shop_name=args.shop, output_dir=args.output_dir)
     print(f"\nJSON 报告: {json_path}")
 
     # CSV 导出
@@ -251,6 +286,7 @@ def main():
         cards=summarizer.cards,
         shop_name=args.shop,
         org_code=args.org_code,
+        output_dir=args.output_dir,
     )
     print(f"CSV 报告: {csv_path}")
 
