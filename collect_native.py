@@ -350,6 +350,8 @@ def main():
         # 3c. 商家回复日期获取:有商家回复的卡片,点击进入详情页获取回复日期
         #     点击策略:优先点"XX(商家)"标签节点;回退到回复内容前缀匹配;多候选按Y升序依次尝试
         #     详情页回复日期可能在屏幕下方,首次提取为空时下滑一次重试
+        #     注意:本地cards的修改不会自动同步到summarizer.cards(去重时本地副本被丢弃),
+        #     需通过dedup_key找到summarizer中的对应卡片同步修改
         cards_with_reply = [c for c in cards if c.get("merchant_reply", "").strip()]
         if cards_with_reply:
             print(f"  [商家回复] {len(cards_with_reply)} 条有商家回复,进入详情页获取回复日期")
@@ -364,6 +366,13 @@ def main():
                 if entered and reply_date:
                     card["merchant_reply_date"] = reply_date
                     print(f"  [商家回复] 回复日期: {reply_date}")
+                    # 同步到summarizer.cards中的对应卡片(去重后保留的是旧卡片,需同步修改)
+                    dedup_key = summarizer._dedup_key(card)
+                    for sc in summarizer.cards:
+                        if summarizer._dedup_key(sc) == dedup_key:
+                            sc["merchant_reply"] = card["merchant_reply"]
+                            sc["merchant_reply_date"] = reply_date
+                            break
                 elif entered:
                     print(f"  [商家回复] 已进入详情页,但未找到回复日期")
                 else:
@@ -378,9 +387,8 @@ def main():
         after = len(summarizer.cards)
         new_count = after - before
         print(f"  [评价] 本屏 {len(valid_cards)} 条,新增 {new_count} 条" + (f"(跳过{skipped}条空用户名)" if skipped else ""))
-        # 增量写入:新增的卡片立即写入 CSV(去重后的新卡片在 summarizer.cards[before:after])
-        for card in summarizer.cards[before:after]:
-            csv_exporter.write_card(card)
+        # 每屏结束用 summarizer.cards 重写 CSV(确保3a/3c补全的回复日期写入,中断不丢数据)
+        csv_exporter.rewrite_all(summarizer.cards)
         for card in valid_cards:
             price_tag = f" 人均¥{card['avg_price']}" if card.get("avg_price") else ""
             print(f"    [{card['user']}] {card['date']} {card['score']}{price_tag}")
