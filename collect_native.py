@@ -144,22 +144,43 @@ def main():
                 detail_xml = adb.dump_ui()
                 reply_date = adb.extract_merchant_reply_date(detail_xml)
             adb.back()  # 返回列表页
-            adb.human_delay(1.0, 1.5)
+            adb.human_delay(1.5, 2.5)
+            # 验证是否已返回列表页(可能仍在详情页,需再次back)
+            for _ in range(2):
+                check_xml = adb.dump_ui()
+                if not adb.detect_review_detail_page(check_xml):
+                    break
+                print(f"  [商家回复] back()后仍在详情页,再次返回")
+                adb.back()
+                adb.human_delay(1.5, 2.5)
             return True, reply_date
         return False, ""
 
     def find_reply_candidates(xml, reply_text, y_max):
-        """在XML中找商家回复的可点击候选元素,按Y升序返回"""
+        """
+        在XML中找商家回复的可点击候选元素,按Y升序返回
+        策略:优先用回复内容前缀精确匹配(避免多条回复误匹配),
+             匹配不到时回退到"XX(商家)"标签节点
+        """
         prefix_m = re.match(r'^(?:商家回复|.+?[（(]商家[）)]|商家)\s*[:：]\s*', reply_text)
-        # 1. 优先:搜索"XX(商家)"标签节点
-        candidates = [b for b in adb.find_elements_by_text(xml, "商家")
-                      if ("（商家）" in b["text"] or "(商家)" in b["text"])
-                      and b["center"][1] < y_max]
-        # 2. 回退:用回复内容前15字符匹配
-        if not candidates and prefix_m:
+        # 1. 优先:用回复内容前15字符精确匹配(定位到具体哪条回复)
+        if prefix_m:
             search_text = reply_text[prefix_m.end():prefix_m.end() + 15]
             candidates = [b for b in adb.find_elements_by_text(xml, search_text)
                           if b["center"][1] < y_max]
+            if candidates:
+                candidates.sort(key=lambda b: b["center"][1])
+                return candidates
+        # 2. 回退:搜索"XX(商家)"标签节点(列表页合并节点如"丰裕(商家): xxx")
+        candidates = [b for b in adb.find_elements_by_text(xml, reply_text[:20])
+                      if b["center"][1] < y_max]
+        if candidates:
+            candidates.sort(key=lambda b: b["center"][1])
+            return candidates
+        # 3. 最终回退:搜索"商家"关键词
+        candidates = [b for b in adb.find_elements_by_text(xml, "商家")
+                      if ("（商家）" in b["text"] or "(商家)" in b["text"])
+                      and b["center"][1] < y_max]
         candidates.sort(key=lambda b: b["center"][1])
         return candidates
 
@@ -280,16 +301,30 @@ def main():
         #     屏幕上只剩内容残余+图片+商家回复,然后是下一条评论。
         #     这条商家回复无法被parser归入当前卡片(无对应日期锚点),
         #     点击进入详情页获取回复日期,补到上一屏最后一条匹配的卡片上
+        # 去重:用回复内容前缀作key,已处理过的孤立回复不再重复点击
+        if not hasattr(main, "_processed_replies"):
+            main._processed_replies = set()
         if hasattr(parser, "leading_replies") and parser.leading_replies:
             print(f"  [商家回复] 检测到 {len(parser.leading_replies)} 条孤立商家回复(属于上一屏评论)")
             _, screen_h = adb.get_screen_size()
             y_max = int(screen_h * 0.90)
             for reply_text in parser.leading_replies:
+                # 跳过已处理的回复(用内容前缀去重)
+                prefix_m = re.match(r'^(?:商家回复|.+?[（(]商家[）)]|商家)\s*[:：]\s*', reply_text)
+                reply_key = reply_text[prefix_m.end():prefix_m.end() + 30] if prefix_m else reply_text[:30]
+                if reply_key in main._processed_replies:
+                    print(f"  [商家回复] 该孤立回复已处理过,跳过")
+                    continue
+                # 跳过上一屏卡片已有回复日期的情况(避免重复补全)
+                if summarizer.cards and summarizer.cards[-1].get("merchant_reply_date", "").strip():
+                    print(f"  [商家回复] 上一屏卡片已有回复日期,跳过孤立回复处理")
+                    continue
                 candidates = find_reply_candidates(xml_str, reply_text, y_max)
                 if not candidates:
                     print(f"  [商家回复] 未在XML中找到孤立回复元素,跳过")
                     continue
                 entered, reply_date = get_reply_date_from_detail(candidates)
+                main._processed_replies.add(reply_key)  # 标记已处理
                 if not entered:
                     print(f"  [商家回复] 孤立回复所有候选均未进入详情页,跳过")
                     continue
