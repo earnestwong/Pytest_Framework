@@ -255,42 +255,55 @@ def main():
 
         # 3b. 商家回复日期获取:有商家回复的卡片,点击进入详情页获取回复日期
         #     与误入详情页检测不冲突:本步骤主动进入→获取→back()退出,下一屏循环开始时已在列表页
+        #     点击策略:优先点"XX(商家)"标签节点(小而明确,位于回复块顶部,稳定可点击);
+        #              标签找不到时回退到回复内容前缀匹配;多候选按 Y 升序依次尝试
+        #     Y 上限保护:过滤屏幕底部 10%(避免误点"回复"按钮区域)
+        #     失败容错:未进入详情页不调用 back()(仍在列表页),换下一个候选重试
         cards_with_reply = [c for c in cards if c.get("merchant_reply", "").strip()]
         if cards_with_reply:
             print(f"  [商家回复] {len(cards_with_reply)} 条有商家回复,进入详情页获取回复日期")
+            _, screen_h = adb.get_screen_size()
+            y_max = int(screen_h * 0.90)  # 底部 10% 为"回复"按钮区域,过滤
             for card in cards_with_reply:
-                # 在当前 XML 中找商家回复元素(用回复内容前15字符搜索,去掉前缀如"商家回复：")
                 reply_text = card["merchant_reply"]
                 prefix_m = re.match(r'^(?:商家回复|.+?\(商家\)|商家)\s*[:：]\s*', reply_text)
-                search_text = reply_text[prefix_m.end():prefix_m.end() + 15] if prefix_m else reply_text[:15]
-                btns = adb.find_elements_by_text(xml_str, search_text)
-                if not btns:
-                    # 回退:搜索"（商家）"标签
-                    btns = [b for b in adb.find_elements_by_text(xml_str, "商家")
-                            if "（商家）" in b["text"] or "(商家)" in b["text"]]
-                if not btns:
-                    print(f"  [商家回复] 未在XML中找到回复元素,跳过")
+                # 1. 优先:搜索"XX(商家)"标签节点(小而明确,点击稳定)
+                candidates = [b for b in adb.find_elements_by_text(xml_str, "商家")
+                              if ("（商家）" in b["text"] or "(商家)" in b["text"])
+                              and b["center"][1] < y_max]
+                # 2. 回退:用回复内容前15字符匹配节点(标签找不到时)
+                if not candidates and prefix_m:
+                    search_text = reply_text[prefix_m.end():prefix_m.end() + 15]
+                    candidates = [b for b in adb.find_elements_by_text(xml_str, search_text)
+                                  if b["center"][1] < y_max]
+                if not candidates:
+                    print(f"  [商家回复] 未在XML中找到可点击的回复元素,跳过")
                     continue
-                x, y = btns[0]["center"]
-                print(f"  [商家回复] 点击 @ ({x}, {y}) 进入详情页")
-                adb.tap(x, y, human=False)
-                adb.human_delay(1.5, 2.5)
-                # dump 详情页,提取回复日期
-                detail_xml = adb.dump_ui()
-                if not adb.detect_review_detail_page(detail_xml):
-                    print(f"  [商家回复] 点击后未进入详情页,跳过")
-                    adb.back()
+                # 按 Y 升序:标签节点位于回复块顶部,优先点击
+                candidates.sort(key=lambda b: b["center"][1])
+                entered = False
+                for btn in candidates:
+                    x, y = btn["center"]
+                    print(f"  [商家回复] 尝试点击 @ ({x}, {y}) text=[{btn['text'][:15]}]")
+                    adb.tap(x, y, human=False)
+                    adb.human_delay(1.5, 2.5)
+                    detail_xml = adb.dump_ui()
+                    if adb.detect_review_detail_page(detail_xml):
+                        entered = True
+                        reply_date = adb.extract_merchant_reply_date(detail_xml)
+                        if reply_date:
+                            card["merchant_reply_date"] = reply_date
+                            print(f"  [商家回复] 回复日期: {reply_date}")
+                        else:
+                            print(f"  [商家回复] 已进入详情页,但未找到回复日期")
+                        adb.back()  # 已进入详情页,返回列表页
+                        adb.human_delay(1.0, 1.5)
+                        break
+                    # 未进入详情页:仍在列表页,不调用 back(),换下一个候选重试
+                    print(f"  [商家回复] 本次点击未进入详情页,尝试下一个候选")
                     adb.human_delay(0.5, 1.0)
-                    continue
-                reply_date = adb.extract_merchant_reply_date(detail_xml)
-                if reply_date:
-                    card["merchant_reply_date"] = reply_date
-                    print(f"  [商家回复] 回复日期: {reply_date}")
-                else:
-                    print(f"  [商家回复] 未找到回复日期")
-                # 返回列表页
-                adb.back()
-                adb.human_delay(1.0, 1.5)
+                if not entered:
+                    print(f"  [商家回复] 所有候选均未进入详情页,跳过本条")
 
         before = len(summarizer.cards)
         result = {"cards": cards, "review_count": len(cards), "source": "native"}
