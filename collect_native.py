@@ -229,11 +229,6 @@ def main():
         # 3. 结构化解析(记录新增数,用于判断是否滑到底)
         cards = parser.parse(text_items)
 
-        # 检测孤立商家回复(第一个日期锚点之前,属于上一条评论的残余)
-        if hasattr(parser, "orphan_replies") and parser.orphan_replies:
-            for reply in parser.orphan_replies:
-                print(f"  [商家回复] 屏幕上方残余商家回复(属于上一条评论,如上一屏已采集则正常): {reply[:40]}...")
-
         # 3a. 用户名缺失补救:滑动过快可能导致用户名滚出上边界未被抓到
         #     强制多次小幅下滑,直到获取用户名或达到最大重试次数(不保存空用户名)
         missing_user = [c for c in cards if not c.get("user", "").strip()]
