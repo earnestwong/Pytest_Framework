@@ -166,6 +166,19 @@ class CSVExporter:
             self._file = None
             self._writer = None
 
+    def rewrite_all(self, cards: List[Dict]):
+        """用全部卡片覆盖重写CSV(用于后续补全字段如孤立商家回复日期)"""
+        if not hasattr(self, "_path"):
+            raise RuntimeError("需先调用 open_incremental()")
+        if hasattr(self, "_file") and self._file:
+            self._file.close()
+        self._file = open(self._path, "w", newline="", encoding="utf-8-sig")
+        self._writer = csv.writer(self._file, lineterminator="\n")
+        self._writer.writerow(self.HEADERS)
+        for card in cards:
+            self._writer.writerow(self._card_to_row(card, self._shop_name, self._org_code))
+        self._file.flush()
+
     def export(
         self,
         cards: List[Dict],

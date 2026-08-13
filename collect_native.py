@@ -117,6 +117,52 @@ def main():
     )
     print(f"CSV 文件: {csv_path}(增量写入)")
 
+    def get_reply_date_from_detail(candidates):
+        """
+        点击候选元素进入详情页,提取商家回复日期(含下滑重试)
+        详情页回复日期可能在屏幕下方,首次提取为空时下滑一次重试
+        :return (是否进入详情页, 回复日期)
+        """
+        for btn in candidates:
+            x, y = btn["center"]
+            print(f"  [商家回复] 尝试点击 @ ({x}, {y}) text=[{btn['text'][:15]}]")
+            adb.tap(x, y, human=False)
+            adb.human_delay(1.5, 2.5)
+            detail_xml = adb.dump_ui()
+            if not adb.detect_review_detail_page(detail_xml):
+                print(f"  [商家回复] 本次点击未进入详情页,尝试下一个候选")
+                adb.human_delay(0.5, 1.0)
+                continue
+            # 已进入详情页,提取回复日期
+            reply_date = adb.extract_merchant_reply_date(detail_xml)
+            if not reply_date:
+                # 首次提取为空,下滑一次露出回复日期再试
+                print(f"  [商家回复] 详情页未找到回复日期,下滑重试")
+                w, h = adb.get_screen_size()
+                adb.swipe(w // 2, int(h * 0.7), w // 2, int(h * 0.3), duration_ms=700, human=False)
+                adb.human_delay(1.0, 1.5)
+                detail_xml = adb.dump_ui()
+                reply_date = adb.extract_merchant_reply_date(detail_xml)
+            adb.back()  # 返回列表页
+            adb.human_delay(1.0, 1.5)
+            return True, reply_date
+        return False, ""
+
+    def find_reply_candidates(xml, reply_text, y_max):
+        """在XML中找商家回复的可点击候选元素,按Y升序返回"""
+        prefix_m = re.match(r'^(?:商家回复|.+?[（(]商家[）)]|商家)\s*[:：]\s*', reply_text)
+        # 1. 优先:搜索"XX(商家)"标签节点
+        candidates = [b for b in adb.find_elements_by_text(xml, "商家")
+                      if ("（商家）" in b["text"] or "(商家)" in b["text"])
+                      and b["center"][1] < y_max]
+        # 2. 回退:用回复内容前15字符匹配
+        if not candidates and prefix_m:
+            search_text = reply_text[prefix_m.end():prefix_m.end() + 15]
+            candidates = [b for b in adb.find_elements_by_text(xml, search_text)
+                          if b["center"][1] < y_max]
+        candidates.sort(key=lambda b: b["center"][1])
+        return candidates
+
     # 无限模式:通过识别"已折叠部分评价"文本判定到底;固定模式:按 args.scroll 滑
     FOLD_HINT = "已折叠部分评价"  # 评论列表到底时点评显示的提示文本
     screen_idx = 0
@@ -229,7 +275,42 @@ def main():
         # 3. 结构化解析(记录新增数,用于判断是否滑到底)
         cards = parser.parse(text_items)
 
-        # 3a. 用户名缺失补救:滑动过快可能导致用户名滚出上边界未被抓到
+        # 3a. 孤立商家回复处理:第一个日期锚点之前的商家回复,属于上一屏最后一条评论
+        #     场景:上一条评论全文展开后很长,上划后日期/用户名移出屏幕,
+        #     屏幕上只剩内容残余+图片+商家回复,然后是下一条评论。
+        #     这条商家回复无法被parser归入当前卡片(无对应日期锚点),
+        #     点击进入详情页获取回复日期,补到上一屏最后一条匹配的卡片上
+        if hasattr(parser, "leading_replies") and parser.leading_replies:
+            print(f"  [商家回复] 检测到 {len(parser.leading_replies)} 条孤立商家回复(属于上一屏评论)")
+            _, screen_h = adb.get_screen_size()
+            y_max = int(screen_h * 0.90)
+            for reply_text in parser.leading_replies:
+                candidates = find_reply_candidates(xml_str, reply_text, y_max)
+                if not candidates:
+                    print(f"  [商家回复] 未在XML中找到孤立回复元素,跳过")
+                    continue
+                entered, reply_date = get_reply_date_from_detail(candidates)
+                if not entered:
+                    print(f"  [商家回复] 孤立回复所有候选均未进入详情页,跳过")
+                    continue
+                if not reply_date:
+                    print(f"  [商家回复] 孤立回复已进入详情页,但未找到回复日期")
+                    continue
+                # 补到上一屏最后一条卡片(第一条评论很长,商家回复在下方滚出后才看到,
+                # 上一屏采集时 merchant_reply 为空,这里同时补上 merchant_reply 和日期)
+                matched = False
+                if summarizer.cards:
+                    card = summarizer.cards[-1]
+                    card["merchant_reply"] = reply_text
+                    card["merchant_reply_date"] = reply_date
+                    print(f"  [商家回复] 补全上一屏评论: {reply_date} -> [{card['user']}] {card['date']}")
+                    matched = True
+                if not matched:
+                    print(f"  [商家回复] 无上一屏卡片可补全,跳过")
+            # 处理孤立回复后重新dump,因为详情页back()可能改变页面状态
+            xml_str = adb.dump_ui()
+
+        # 3b. 用户名缺失补救:滑动过快可能导致用户名滚出上边界未被抓到
         #     强制多次小幅下滑,直到获取用户名或达到最大重试次数(不保存空用户名)
         missing_user = [c for c in cards if not c.get("user", "").strip()]
         if missing_user:
@@ -266,56 +347,26 @@ def main():
                 for c in final_missing:
                     c["_skip_empty_user"] = True  # 标记跳过
 
-        # 3b. 商家回复日期获取:有商家回复的卡片,点击进入详情页获取回复日期
-        #     与误入详情页检测不冲突:本步骤主动进入→获取→back()退出,下一屏循环开始时已在列表页
-        #     点击策略:优先点"XX(商家)"标签节点(小而明确,位于回复块顶部,稳定可点击);
-        #              标签找不到时回退到回复内容前缀匹配;多候选按 Y 升序依次尝试
-        #     Y 上限保护:过滤屏幕底部 10%(避免误点"回复"按钮区域)
-        #     失败容错:未进入详情页不调用 back()(仍在列表页),换下一个候选重试
+        # 3c. 商家回复日期获取:有商家回复的卡片,点击进入详情页获取回复日期
+        #     点击策略:优先点"XX(商家)"标签节点;回退到回复内容前缀匹配;多候选按Y升序依次尝试
+        #     详情页回复日期可能在屏幕下方,首次提取为空时下滑一次重试
         cards_with_reply = [c for c in cards if c.get("merchant_reply", "").strip()]
         if cards_with_reply:
             print(f"  [商家回复] {len(cards_with_reply)} 条有商家回复,进入详情页获取回复日期")
             _, screen_h = adb.get_screen_size()
-            y_max = int(screen_h * 0.90)  # 底部 10% 为"回复"按钮区域,过滤
+            y_max = int(screen_h * 0.90)
             for card in cards_with_reply:
-                reply_text = card["merchant_reply"]
-                prefix_m = re.match(r'^(?:商家回复|.+?[（(]商家[）)]|商家)\s*[:：]\s*', reply_text)
-                # 1. 优先:搜索"XX(商家)"标签节点(小而明确,点击稳定)
-                candidates = [b for b in adb.find_elements_by_text(xml_str, "商家")
-                              if ("（商家）" in b["text"] or "(商家)" in b["text"])
-                              and b["center"][1] < y_max]
-                # 2. 回退:用回复内容前15字符匹配节点(标签找不到时)
-                if not candidates and prefix_m:
-                    search_text = reply_text[prefix_m.end():prefix_m.end() + 15]
-                    candidates = [b for b in adb.find_elements_by_text(xml_str, search_text)
-                                  if b["center"][1] < y_max]
+                candidates = find_reply_candidates(xml_str, card["merchant_reply"], y_max)
                 if not candidates:
                     print(f"  [商家回复] 未在XML中找到可点击的回复元素,跳过")
                     continue
-                # 按 Y 升序:标签节点位于回复块顶部,优先点击
-                candidates.sort(key=lambda b: b["center"][1])
-                entered = False
-                for btn in candidates:
-                    x, y = btn["center"]
-                    print(f"  [商家回复] 尝试点击 @ ({x}, {y}) text=[{btn['text'][:15]}]")
-                    adb.tap(x, y, human=False)
-                    adb.human_delay(1.5, 2.5)
-                    detail_xml = adb.dump_ui()
-                    if adb.detect_review_detail_page(detail_xml):
-                        entered = True
-                        reply_date = adb.extract_merchant_reply_date(detail_xml)
-                        if reply_date:
-                            card["merchant_reply_date"] = reply_date
-                            print(f"  [商家回复] 回复日期: {reply_date}")
-                        else:
-                            print(f"  [商家回复] 已进入详情页,但未找到回复日期")
-                        adb.back()  # 已进入详情页,返回列表页
-                        adb.human_delay(1.0, 1.5)
-                        break
-                    # 未进入详情页:仍在列表页,不调用 back(),换下一个候选重试
-                    print(f"  [商家回复] 本次点击未进入详情页,尝试下一个候选")
-                    adb.human_delay(0.5, 1.0)
-                if not entered:
+                entered, reply_date = get_reply_date_from_detail(candidates)
+                if entered and reply_date:
+                    card["merchant_reply_date"] = reply_date
+                    print(f"  [商家回复] 回复日期: {reply_date}")
+                elif entered:
+                    print(f"  [商家回复] 已进入详情页,但未找到回复日期")
+                else:
                     print(f"  [商家回复] 所有候选均未进入详情页,跳过本条")
 
         # 过滤掉标记跳过的卡片(空用户名且重试失败)
@@ -357,9 +408,10 @@ def main():
     print(f"评价总数: {summary['total_reviews']}(去重后)")
     print(f"采集通道: 原生 {summary['source_stats']['native']} 屏")
 
-    # 关闭 CSV 文件(增量写入已在循环中完成)
+    # 用 summarizer.cards 重写 CSV(补全孤立商家回复日期等后续获取的字段)
+    csv_exporter.rewrite_all(summarizer.cards)
     csv_exporter.close()
-    print(f"CSV 报告: {csv_path}")
+    print(f"CSV 报告: {csv_path}(已更新含回复日期补全)")
 
     # JSON 报告
     json_path = summarizer.save(shop_name=args.shop, output_dir=args.output_dir)

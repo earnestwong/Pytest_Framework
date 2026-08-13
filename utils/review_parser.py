@@ -82,6 +82,17 @@ class ReviewParser:
         # 第2步:找所有日期节点索引(卡片锚点)
         date_idxs = [i for i, it in enumerate(valid) if self.DATE_PAT.match(it["text"])]
 
+        # 第2b步:检测第一个日期锚点之前的孤立商家回复
+        #   场景:上一条评论很长,全文展开后上划,日期/用户名移出屏幕,
+        #   屏幕上只剩内容残余+图片+商家回复,然后是下一条评论。
+        #   这条商家回复属于上一屏最后一条评论,记录到 leading_replies 供调用方处理
+        self.leading_replies = []
+        if date_idxs:
+            first_d = date_idxs[0]
+            for i in range(first_d):
+                if self.MERCHANT_PAT.match(valid[i]["text"]):
+                    self.leading_replies.append(valid[i]["text"])
+
         # 第3步:按日期锚点切分并解析每张卡片
         # 注意:MuMu 顺序下「用户名→日期」,下一张的用户名会落在当前卡片范围内,
         # 需检查下一日期锚点前一节点是否为用户名候选,若是则本张 end_idx 前移一位,
