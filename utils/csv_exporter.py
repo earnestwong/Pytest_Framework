@@ -1,7 +1,7 @@
 """
 CSV 导出模块:把采集到的评价卡片写入 CSV 文件
 字段顺序:org_code, store_name, username, review_date, rating, price_per_person, content, sentiment, store_feedback
-编码:utf8mb4(纯 utf-8 无 BOM,MySQL LOAD DATA / 导入兼容)
+编码:utf-8-sig(带 BOM,Excel 正确识别中文;MySQL utf8mb4 表导入兼容)
 日期格式:统一 YYYY-MM-DD,相对时间(刚刚/N小时前/N天前/昨天/前天)按当前日期换算
 """
 import csv
@@ -135,9 +135,9 @@ class CSVExporter:
         safe_name = "".join(c for c in shop_name if c.isalnum() or c in "_-")
         path = os.path.join(output_dir, f"{safe_name}_reviews_{ts}.csv")
 
-        # utf-8(无 BOM)兼容 MySQL utf8mb4 导入(LOAD DATA / workbench)
+        # utf-8-sig(带 BOM):Excel 正确识别中文,MySQL utf8mb4 表导入兼容
         # 换行符 \n(Linux 风格,避免 \r\n 在某些 MySQL 导入场景被解析为内容)
-        with open(path, "w", newline="", encoding="utf-8") as f:
+        with open(path, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f, lineterminator="\n")
             writer.writerow(self.HEADERS)
             for card in cards:

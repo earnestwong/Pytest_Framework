@@ -7,6 +7,7 @@ import subprocess
 import time
 import random
 import os
+import re
 import xml.etree.ElementTree as ET
 from typing import Optional, List, Dict, Tuple
 
@@ -99,11 +100,14 @@ class ADBHelper:
         """随机延时,模拟人类操作间隔"""
         time.sleep(random.uniform(min_s, max_s))
 
-    def tap(self, x: int, y: int, human: bool = True):
-        """点击坐标,可附加随机偏移(加大随机性降低反扒风险)"""
+    def tap(self, x: int, y: int, human: bool = True, offset: int = 8):
+        """
+        点击坐标,可附加随机偏移(加大随机性降低反扒风险)
+        :param offset: 随机偏移量(±offset px),小屏/小按钮用更小值避免偏出可点击区
+        """
         if human:
-            x += random.randint(-8, 8)
-            y += random.randint(-8, 8)
+            x += random.randint(-offset, offset)
+            y += random.randint(-offset, offset)
         self.shell(f"input tap {x} {y}")
         if human:
             self.human_delay()
@@ -233,6 +237,9 @@ class ADBHelper:
                 coords = bounds.replace("][", ",").strip("[]").split(",")
                 if len(coords) == 4:
                     x1, y1, x2, y2 = map(int, coords)
+                    # 过滤零面积/无效 bounds(如 [0,0,0,0])
+                    if x2 <= x1 or y2 <= y1:
+                        continue
                     results.append(
                         {
                             "text": node_text,
@@ -364,6 +371,39 @@ class ADBHelper:
         # 滑动后等待验证结果
         time.sleep(random.uniform(2.0, 3.5))
         return True
+
+    # ---------- 评论详情页检测 ----------
+
+    # 评论评分文本(与 review_parser.SCORE_TEXTS 对齐)
+    _REVIEW_SCORES = {
+        "很差", "较差", "一般", "好评", "很好", "满意", "超赞",
+        "很糟糕", "糟糕", "还行", "不错", "非常满意",
+        "超预期", "很棒", "还可以",
+    }
+    # 店铺星级卡片特征:"· 3.8 星" / "3.8 星" / "3.8星"(详情页底部店铺卡片独有)
+    _SHOP_STAR_PAT = re.compile(r'·?\s*\d+(?:\.\d+)?\s*星')
+
+    def detect_review_detail_page(self, xml_str: str) -> bool:
+        """
+        检测是否在评论详情页(同时存在评论卡片 + 店铺卡片)
+        详情页特征:评论内容下方有店铺名+星级卡片(如"丰裕(淮海店)" + "· 3.8 星")
+        列表页不会出现店铺星级卡片,以此为判据
+        :return True=在详情页(需 back 返回);False=在列表页
+        """
+        root = ET.fromstring(xml_str)
+        has_shop_star = False   # 店铺星级卡片(详情页独有)
+        has_review_score = False  # 评论评分文本(评论卡片特征)
+        for node in root.iter("node"):
+            text = (node.attrib.get("text", "") + node.attrib.get("content-desc", "")).strip()
+            if not text:
+                continue
+            if not has_shop_star and self._SHOP_STAR_PAT.search(text):
+                has_shop_star = True
+            if not has_review_score and text in self._REVIEW_SCORES:
+                has_review_score = True
+            if has_shop_star and has_review_score:
+                return True
+        return False
 
     # ---------- 截图 ----------
 

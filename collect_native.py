@@ -53,6 +53,9 @@ def parse_args():
 
 def main():
     args = parse_args()
+    # 去除命令行参数首尾可能误带的引号(如 --org-code "080501" 不影响,但 "080501" 会带引号)
+    args.shop = args.shop.strip().strip('"').strip("'")
+    args.org_code = args.org_code.strip().strip('"').strip("'")
 
     # 初始化(原生通道无需 OCR)
     # 设备地址留空=USB 真机(直连,无需 adb connect);填 IP:Port=模拟器(需 adb connect)
@@ -81,9 +84,8 @@ def main():
     print(f"店铺: {args.shop}  org_code: {args.org_code}  采集屏数: {total_screens}  滑动比例: {args.ratio}  滑动方式: {swipe_mode}")
     print()
 
-    # 无限模式:连续 5 屏无新评价则停;固定模式:按 args.scroll 滑
-    MAX_IDLE = 5  # 连续无新增的屏数阈值(应对单条超长评论占满整屏)
-    idle_count = 0
+    # 无限模式:通过识别"已折叠部分评价"文本判定到底;固定模式:按 args.scroll 滑
+    FOLD_HINT = "已折叠部分评价"  # 评论列表到底时点评显示的提示文本
     screen_idx = 0
     while True:
         # 固定模式:达到屏数上限则停
@@ -92,10 +94,15 @@ def main():
 
         print(f"--- 第 {screen_idx + 1}{('屏' if infinite else f'/{args.scroll} 屏')} ---")
 
-        # 1. dump 当前屏(复用于:验证码检测 + 全文按钮定位)
+        # 1. dump 当前屏(复用于:到底检测 + 验证码检测 + 全文按钮定位)
         xml_str = adb.dump_ui()
 
-        # 1a. 滑动验证码检测(反扒随机弹出,复用本次 dump 不额外消耗)
+        # 1a. 到底检测:评论列表底部出现"依据平台规则,已折叠部分评价"
+        if FOLD_HINT in xml_str:
+            print(f"  [到底] 识别到'{FOLD_HINT}'提示,评论列表已到底")
+            break
+
+        # 1b. 滑动验证码检测(反扒随机弹出,复用本次 dump 不额外消耗)
         try:
             captcha = adb.detect_slide_captcha(xml_str)
             if captcha:
@@ -110,10 +117,14 @@ def main():
         except Exception as e:
             print(f"  [验证] 检测异常(忽略): {e}")
 
-        # 1b. 展开全文(长评论折叠处理)
+        # 1c. 展开全文(长评论折叠处理)
         #     每次点击后重新 dump 获取最新坐标(展开后下方元素位置下移)
         #     筛选已排除"收起全文"(展开后按钮文本),不会重复点击同一按钮
         #     个别"全文"按钮可能点击无效(点评App bug),连续3次无效则放弃,继续下滑
+        #     坐标校验:1.排除顶部15%安全区(防误触导航栏/Tab导致跳顶)
+        #              2.Y坐标偏差过大则停止展开(页面可能已跳转至详情页)
+        safe_y_min = int(h * 0.15)           # 顶部15%安全区下边界
+        y_drift_max = int(h * 0.25)          # Y坐标偏差阈值(超过则判定页面跳转)
         max_expand = 15  # 单屏最多展开次数,防止死循环
         max_fail = 3     # 连续点击无效次数上限
         expanded = 0
@@ -124,26 +135,42 @@ def main():
             # 排除"查看全文"(导航链接)和"收起全文"(收起按钮)
             btns = [b for b in all_btns
                     if "查看" not in b["text"] and "收起" not in b["text"]]
+            # 排除顶部15%安全区内的按钮(防止误触导航栏/Tab导致列表跳顶)
+            btns = [b for b in btns if b["center"][1] > safe_y_min]
             if not btns:
                 break
             first_y = btns[0]["center"][1]
-            # 若第一个按钮仍是上次那个位置,说明点击无效(点评bug)
-            if last_first_y is not None and abs(first_y - last_first_y) < 80:
-                fail_count += 1
-                if fail_count >= max_fail:
-                    print(f"  [展开] 连续{max_fail}次点击无效,跳过本屏展开继续下滑")
+            if last_first_y is not None:
+                y_diff = abs(first_y - last_first_y)
+                # Y坐标偏差过大:页面可能已跳转(如误进详情页),停止展开
+                if y_diff > y_drift_max:
+                    print(f"  [展开] 按钮Y坐标偏差过大({y_diff}px > {y_drift_max}px),可能已离开列表,停止展开")
                     break
-            else:
-                fail_count = 0
+                # Y坐标偏差过小:按钮位置没变,点击无效(点评bug)
+                if y_diff < 80:
+                    fail_count += 1
+                    if fail_count >= max_fail:
+                        print(f"  [展开] 连续{max_fail}次点击无效,跳过本屏展开继续下滑")
+                        break
+                else:
+                    fail_count = 0
             last_first_y = first_y
             btn = btns[0]
             x, y = btn["center"]
             print(f"  [展开] 点击「全文」@ ({x}, {y}) text=[{btn['text'][:20]}]")
-            adb.tap(x, y)
+            adb.tap(x, y, offset=3)
             adb.human_delay(1.0, 2.0)
             expanded += 1
             # 重新 dump:展开后坐标全变,必须刷新
             xml_str = adb.dump_ui()
+            # 检测是否误进评论详情页(小屏设备双击/坐标偏差导致)
+            # 详情页特征:同时有评论卡片(评分) + 店铺卡片(星级)
+            if adb.detect_review_detail_page(xml_str):
+                print("  [展开] 误进评论详情页,执行返回回到列表页")
+                adb.back()
+                adb.human_delay(1.0, 1.5)
+                xml_str = adb.dump_ui()
+                break  # 本屏展开结束,用返回后的列表页 xml 继续提取
 
         if expanded > 0:
             print(f"  [展开] 本屏共展开 {expanded} 条全文")
@@ -194,20 +221,9 @@ def main():
             if card["merchant_reply"]:
                 print(f"      商家: {card['merchant_reply'][:60]}...")
 
-        # 4. 无限模式:判断是否滑到底
-        if infinite:
-            if new_count == 0:
-                idle_count += 1
-                print(f"  [到底检测] 连续 {idle_count}/{MAX_IDLE} 屏无新增")
-                if idle_count >= MAX_IDLE:
-                    print("  [到底] 已连续 5 屏无新评价,停止滑动")
-                    break
-            else:
-                idle_count = 0
-
-        # 5. 上滑翻屏
+        # 4. 上滑翻屏(到底判定已在第1步通过"已折叠部分评价"文本完成)
         screen_idx += 1
-        # 固定模式最后一屏不滑;无限模式判断完到底才滑
+        # 固定模式最后一屏不滑
         if not infinite and screen_idx >= args.scroll:
             break
         adb.swipe_up(ratio=args.ratio, mode=swipe_mode)
