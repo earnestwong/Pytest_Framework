@@ -16,15 +16,16 @@ class CSVExporter:
 
     # CSV 表头(顺序固定)
     HEADERS = [
-        "org_code",          # 机构编码(与 store_name 一致)
-        "store_name",        # 店铺名
-        "username",          # 用户名
-        "review_date",       # 评价日期(YYYY-MM-DD)
-        "rating",            # 评分
-        "price_per_person",  # 人均单价
-        "content",           # 评价内容
-        "sentiment",         # 情感(根据 rating 映射:positive/neutral/negative)
-        "store_feedback",    # 商家回复
+        "org_code",            # 机构编码(与 store_name 一致)
+        "store_name",          # 店铺名
+        "username",            # 用户名
+        "review_date",         # 评价日期(YYYY-MM-DD)
+        "rating",              # 评分
+        "price_per_person",    # 人均单价
+        "content",             # 评价内容
+        "sentiment",           # 情感(根据 rating 映射:positive/neutral/negative)
+        "store_feedback",      # 商家回复
+        "store_feedback_date", # 商家回复日期(YYYY-MM-DD)
     ]
 
     # rating 文案 -> sentiment 映射(按大众点评常见评分文案)
@@ -125,6 +126,7 @@ class CSVExporter:
             card.get("content", ""),
             self._rating_to_sentiment(card.get("score", "")),
             card.get("merchant_reply", ""),
+            self._normalize_date(card.get("merchant_reply_date", "")),
         ]
 
     def open_incremental(

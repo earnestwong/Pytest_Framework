@@ -19,6 +19,7 @@
 """
 import sys
 import os
+import re
 import json
 import argparse
 
@@ -251,6 +252,45 @@ def main():
                         old_card["user"] = new_card["user"]
                         print(f"  [补救] 补全用户名: [{new_card['user']}] {old_card['date']}")
                         break
+
+        # 3b. 商家回复日期获取:有商家回复的卡片,点击进入详情页获取回复日期
+        #     与误入详情页检测不冲突:本步骤主动进入→获取→back()退出,下一屏循环开始时已在列表页
+        cards_with_reply = [c for c in cards if c.get("merchant_reply", "").strip()]
+        if cards_with_reply:
+            print(f"  [商家回复] {len(cards_with_reply)} 条有商家回复,进入详情页获取回复日期")
+            for card in cards_with_reply:
+                # 在当前 XML 中找商家回复元素(用回复内容前15字符搜索,去掉前缀如"商家回复：")
+                reply_text = card["merchant_reply"]
+                prefix_m = re.match(r'^(?:商家回复|.+?\(商家\)|商家)\s*[:：]\s*', reply_text)
+                search_text = reply_text[prefix_m.end():prefix_m.end() + 15] if prefix_m else reply_text[:15]
+                btns = adb.find_elements_by_text(xml_str, search_text)
+                if not btns:
+                    # 回退:搜索"（商家）"标签
+                    btns = [b for b in adb.find_elements_by_text(xml_str, "商家")
+                            if "（商家）" in b["text"] or "(商家)" in b["text"]]
+                if not btns:
+                    print(f"  [商家回复] 未在XML中找到回复元素,跳过")
+                    continue
+                x, y = btns[0]["center"]
+                print(f"  [商家回复] 点击 @ ({x}, {y}) 进入详情页")
+                adb.tap(x, y, human=False)
+                adb.human_delay(1.5, 2.5)
+                # dump 详情页,提取回复日期
+                detail_xml = adb.dump_ui()
+                if not adb.detect_review_detail_page(detail_xml):
+                    print(f"  [商家回复] 点击后未进入详情页,跳过")
+                    adb.back()
+                    adb.human_delay(0.5, 1.0)
+                    continue
+                reply_date = adb.extract_merchant_reply_date(detail_xml)
+                if reply_date:
+                    card["merchant_reply_date"] = reply_date
+                    print(f"  [商家回复] 回复日期: {reply_date}")
+                else:
+                    print(f"  [商家回复] 未找到回复日期")
+                # 返回列表页
+                adb.back()
+                adb.human_delay(1.0, 1.5)
 
         before = len(summarizer.cards)
         result = {"cards": cards, "review_count": len(cards), "source": "native"}

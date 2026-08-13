@@ -396,6 +396,39 @@ class ADBHelper:
                 return True
         return False
 
+    # 商家回复日期格式:8月11日  11:08 / 2025年8月11日  11:08 / 2025-08-11 11:08
+    _REPLY_DATE_PAT = re.compile(
+        r'(\d{4}年\d{1,2}月\d{1,2}日|\d{1,2}月\d{1,2}日|\d{4}[-/.]\d{1,2}[-/.]\d{1,2})'
+        r'\s+\d{1,2}:\d{2}'
+    )
+
+    def extract_merchant_reply_date(self, xml_str: str) -> str:
+        """
+        从评论详情页提取商家回复日期
+        详情页结构:... 商家标签(如"丰裕（商家）") → 回复内容 → 回复日期(带时间) → 回复按钮
+        :return 日期原始文本(由调用方标准化),未找到返回空串
+        """
+        items = self.extract_all_text(xml_str, min_len=1)
+        # 找到"商家"标签位置(如"丰裕（商家）")
+        merchant_idx = -1
+        for i, it in enumerate(items):
+            text = it["text"]
+            if "（商家）" in text or "(商家)" in text:
+                merchant_idx = i
+                break
+        if merchant_idx == -1:
+            return ""
+        # 从商家标签后找"日期+时间"格式文本(回复日期在回复内容和"回复"按钮之间)
+        for i in range(merchant_idx + 1, len(items)):
+            text = items[i]["text"]
+            m = self._REPLY_DATE_PAT.search(text)
+            if m:
+                return m.group(1)  # 返回日期部分(不含时间,时间由调用方丢弃)
+            # 遇到"回复"按钮就停(日期在回复按钮之前)
+            if items[i]["text"] == "回复":
+                break
+        return ""
+
     # ---------- 截图 ----------
 
     def screenshot(self, save_path: str) -> str:
