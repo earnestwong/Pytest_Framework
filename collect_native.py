@@ -107,6 +107,15 @@ def main():
     print(f"店铺: {args.shop}  org_code: {args.org_code}  采集屏数: {total_screens}  滑动比例: {args.ratio}  滑动方式: {swipe_mode}")
     print()
 
+    # CSV 增量写入:每采集到一条新评论立即写入文件并 flush,Ctrl+C 中断不丢数据
+    csv_exporter = CSVExporter()
+    csv_path = csv_exporter.open_incremental(
+        shop_name=args.shop,
+        org_code=args.org_code,
+        output_dir=args.output_dir,
+    )
+    print(f"CSV 文件: {csv_path}(增量写入)")
+
     # 无限模式:通过识别"已折叠部分评价"文本判定到底;固定模式:按 args.scroll 滑
     FOLD_HINT = "已折叠部分评价"  # 评论列表到底时点评显示的提示文本
     screen_idx = 0
@@ -193,7 +202,7 @@ def main():
             btn = btns[0]
             x, y = btn["center"]
             print(f"  [展开] 点击「全文」@ ({x}, {y}) text=[{btn['text'][:20]}]")
-            adb.tap(x, y, offset=3)
+            adb.tap(x, y, human=False)
             adb.human_delay(1.0, 2.0)
             expanded += 1
             # 重新 dump:展开后坐标全变,必须刷新
@@ -249,6 +258,9 @@ def main():
         after = len(summarizer.cards)
         new_count = after - before
         print(f"  [评价] 本屏 {len(cards)} 条,新增 {new_count} 条")
+        # 增量写入:新增的卡片立即写入 CSV(去重后的新卡片在 summarizer.cards[before:after])
+        for card in summarizer.cards[before:after]:
+            csv_exporter.write_card(card)
         for card in cards:
             price_tag = f" 人均¥{card['avg_price']}" if card.get("avg_price") else ""
             print(f"    [{card['user']}] {card['date']} {card['score']}{price_tag}")
@@ -276,19 +288,13 @@ def main():
     print(f"评价总数: {summary['total_reviews']}(去重后)")
     print(f"采集通道: 原生 {summary['source_stats']['native']} 屏")
 
+    # 关闭 CSV 文件(增量写入已在循环中完成)
+    csv_exporter.close()
+    print(f"CSV 报告: {csv_path}")
+
     # JSON 报告
     json_path = summarizer.save(shop_name=args.shop, output_dir=args.output_dir)
-    print(f"\nJSON 报告: {json_path}")
-
-    # CSV 导出
-    csv_exporter = CSVExporter()
-    csv_path = csv_exporter.export(
-        cards=summarizer.cards,
-        shop_name=args.shop,
-        org_code=args.org_code,
-        output_dir=args.output_dir,
-    )
-    print(f"CSV 报告: {csv_path}")
+    print(f"JSON 报告: {json_path}")
 
     print("\n采集完成")
 

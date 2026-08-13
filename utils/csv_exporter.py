@@ -113,6 +113,57 @@ class CSVExporter:
         # 5. 兜底:原样返回
         return s
 
+    def _card_to_row(self, card: Dict, shop_name: str, org_code: str) -> List:
+        """把单张卡片转为 CSV 行"""
+        return [
+            org_code,
+            shop_name,
+            card.get("user", ""),
+            self._normalize_date(card.get("date", "")),
+            card.get("score", ""),
+            card.get("avg_price", ""),
+            card.get("content", ""),
+            self._rating_to_sentiment(card.get("score", "")),
+            card.get("merchant_reply", ""),
+        ]
+
+    def open_incremental(
+        self,
+        shop_name: str = "shop",
+        org_code: str = "",
+        output_dir: str = "reports/dianping",
+    ) -> str:
+        """
+        创建 CSV 文件并写入表头,用于增量写入模式
+        :return CSV 文件路径(后续 write_card/close 用 self._file/self._writer)
+        """
+        os.makedirs(output_dir, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_name = "".join(c for c in shop_name if c.isalnum() or c in "_-")
+        path = os.path.join(output_dir, f"{safe_name}_reviews_{ts}.csv")
+        self._file = open(path, "w", newline="", encoding="utf-8-sig")
+        self._writer = csv.writer(self._file, lineterminator="\n")
+        self._writer.writerow(self.HEADERS)
+        self._file.flush()
+        self._shop_name = shop_name
+        self._org_code = org_code
+        self._path = path
+        return path
+
+    def write_card(self, card: Dict):
+        """增量写入单条卡片并 flush(防 Ctrl+C 丢数据)"""
+        if not hasattr(self, "_writer"):
+            raise RuntimeError("需先调用 open_incremental()")
+        self._writer.writerow(self._card_to_row(card, self._shop_name, self._org_code))
+        self._file.flush()
+
+    def close(self):
+        """关闭增量写入的文件句柄"""
+        if hasattr(self, "_file") and self._file:
+            self._file.close()
+            self._file = None
+            self._writer = None
+
     def export(
         self,
         cards: List[Dict],
@@ -121,7 +172,7 @@ class CSVExporter:
         output_dir: str = "reports/dianping",
     ) -> str:
         """
-        导出评价卡片到 CSV(utf8mb4 编码)
+        一次性导出全部评价卡片到 CSV(utf8mb4 编码)
         :param cards: ReviewSummarizer.cards 或 ReviewParser.parse() 的返回值
                       每张卡片含 user/date/score/content/avg_price/merchant_reply
         :param shop_name: 店铺名,写入 store_name 列 + 用于文件名
@@ -141,15 +192,5 @@ class CSVExporter:
             writer = csv.writer(f, lineterminator="\n")
             writer.writerow(self.HEADERS)
             for card in cards:
-                writer.writerow([
-                    org_code,
-                    shop_name,
-                    card.get("user", ""),
-                    self._normalize_date(card.get("date", "")),
-                    card.get("score", ""),
-                    card.get("avg_price", ""),
-                    card.get("content", ""),
-                    self._rating_to_sentiment(card.get("score", "")),
-                    card.get("merchant_reply", ""),
-                ])
+                writer.writerow(self._card_to_row(card, shop_name, org_code))
         return path

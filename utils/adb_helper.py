@@ -385,23 +385,14 @@ class ADBHelper:
 
     def detect_review_detail_page(self, xml_str: str) -> bool:
         """
-        检测是否在评论详情页(同时存在评论卡片 + 店铺卡片)
-        详情页特征:评论内容下方有店铺名+星级卡片(如"丰裕(淮海店)" + "· 3.8 星")
-        列表页不会出现店铺星级卡片,以此为判据
+        检测是否在评论详情页
+        详情页独有特征:店铺星级卡片(如"· 3.3 星"),评论列表页不会出现此元素
         :return True=在详情页(需 back 返回);False=在列表页
         """
         root = ET.fromstring(xml_str)
-        has_shop_star = False   # 店铺星级卡片(详情页独有)
-        has_review_score = False  # 评论评分文本(评论卡片特征)
         for node in root.iter("node"):
             text = (node.attrib.get("text", "") + node.attrib.get("content-desc", "")).strip()
-            if not text:
-                continue
-            if not has_shop_star and self._SHOP_STAR_PAT.search(text):
-                has_shop_star = True
-            if not has_review_score and text in self._REVIEW_SCORES:
-                has_review_score = True
-            if has_shop_star and has_review_score:
+            if text and self._SHOP_STAR_PAT.search(text):
                 return True
         return False
 
