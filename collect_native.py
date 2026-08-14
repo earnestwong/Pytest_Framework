@@ -117,11 +117,13 @@ def main():
     )
     print(f"CSV 文件: {csv_path}(增量写入)")
 
-    def get_reply_date_from_detail(candidates):
+    def get_reply_date_from_detail(candidates, target_user=""):
         """
         点击候选元素进入详情页,提取商家回复日期(含下滑重试)
         详情页回复日期可能在屏幕下方,首次提取为空时下滑一次重试
-        :return (是否进入详情页, 回复日期)
+        :param target_user: 目标评论者用户名(非空时校验详情页评论者,
+                            点错详情页则返回列表继续尝试下一个候选)
+        :return (是否成功取得回复日期, 回复日期, 详情页评论者用户名)
         """
         for btn in candidates:
             x, y = btn["center"]
@@ -133,56 +135,123 @@ def main():
                 print(f"  [商家回复] 本次点击未进入详情页,尝试下一个候选")
                 adb.human_delay(0.5, 1.0)
                 continue
-            # 已进入详情页,提取回复日期
+            # 已进入详情页:记录评论者用户名(供调用方校验点进的是否目标评论)
+            detail_user = adb.extract_detail_user(detail_xml)
+            # 点错详情页(评论者不符):返回列表继续尝试其他候选,避免直接放弃
+            if target_user and detail_user and not _user_match(detail_user, target_user):
+                print(f"  [商家回复] 详情页评论者[{detail_user}]与目标[{target_user}]不符,返回继续尝试")
+                adb.back()
+                adb.human_delay(2.0, 3.0)
+                continue
+            # 提取回复日期;长详情页(多条用户评论)回复日期在下方,最多下滑3次重试
             reply_date = adb.extract_merchant_reply_date(detail_xml)
-            if not reply_date:
-                # 首次提取为空,下滑一次露出回复日期再试
+            w, h = adb.get_screen_size()
+            for _ in range(3):
+                if reply_date:
+                    break
                 print(f"  [商家回复] 详情页未找到回复日期,下滑重试")
-                w, h = adb.get_screen_size()
                 adb.swipe(w // 2, int(h * 0.7), w // 2, int(h * 0.3), duration_ms=700, human=False)
                 adb.human_delay(1.0, 1.5)
                 detail_xml = adb.dump_ui()
                 reply_date = adb.extract_merchant_reply_date(detail_xml)
+                if not detail_user:
+                    detail_user = adb.extract_detail_user(detail_xml)
             adb.back()  # 返回列表页
-            adb.human_delay(1.5, 2.5)
-            # 验证是否已返回列表页(可能仍在详情页,需再次back)
-            for _ in range(2):
+            adb.human_delay(3.0, 4.0)  # 等待页面加载稳定,避免过渡动画误判
+            # 验证是否已返回列表页:用严格判定(星级卡片+回复按钮/商家标签),
+            # 商店页虽有星级卡片但没有"回复"按钮/商家标签,不会误判,
+            # 只在确认仍在详情页时才再back()一次,且最多一次,防止过度back()跳出列表
+            check_xml = adb.dump_ui()
+            if adb.detect_review_detail_page_strict(check_xml):
+                # 二次确认:等待后再检测,排除过渡动画干扰
+                adb.human_delay(1.5, 2.0)
                 check_xml = adb.dump_ui()
-                if not adb.detect_review_detail_page(check_xml):
-                    break
-                print(f"  [商家回复] back()后仍在详情页,再次返回")
-                adb.back()
-                adb.human_delay(1.5, 2.5)
-            return True, reply_date
-        return False, ""
+                if adb.detect_review_detail_page_strict(check_xml):
+                    print(f"  [商家回复] back()后仍在详情页,再次返回")
+                    adb.back()
+                    adb.human_delay(3.0, 4.0)
+            return True, reply_date, detail_user
+        return False, "", ""
 
     def find_reply_candidates(xml, reply_text, y_max):
         """
         在XML中找商家回复的可点击候选元素,按Y升序返回
         策略:优先用回复内容前缀精确匹配(避免多条回复误匹配),
              匹配不到时回退到"XX(商家)"标签节点
+        顶部(y<16%)为导航/搜索区,点击无效,排除
         """
+        _, screen_h = adb.get_screen_size()
+        y_min = int(screen_h * 0.16)
         prefix_m = re.match(r'^(?:商家回复|.+?[（(]商家[）)]|商家)\s*[:：]\s*', reply_text)
         # 1. 优先:用回复内容前15字符精确匹配(定位到具体哪条回复)
         if prefix_m:
             search_text = reply_text[prefix_m.end():prefix_m.end() + 15]
             candidates = [b for b in adb.find_elements_by_text(xml, search_text)
-                          if b["center"][1] < y_max]
+                          if y_min < b["center"][1] < y_max]
             if candidates:
                 candidates.sort(key=lambda b: b["center"][1])
                 return candidates
         # 2. 回退:搜索"XX(商家)"标签节点(列表页合并节点如"丰裕(商家): xxx")
         candidates = [b for b in adb.find_elements_by_text(xml, reply_text[:20])
-                      if b["center"][1] < y_max]
+                      if y_min < b["center"][1] < y_max]
         if candidates:
             candidates.sort(key=lambda b: b["center"][1])
             return candidates
         # 3. 最终回退:搜索"商家"关键词
         candidates = [b for b in adb.find_elements_by_text(xml, "商家")
                       if ("（商家）" in b["text"] or "(商家)" in b["text"])
-                      and b["center"][1] < y_max]
+                      and y_min < b["center"][1] < y_max]
         candidates.sort(key=lambda b: b["center"][1])
         return candidates
+
+    def _reply_fingerprint(text: str) -> str:
+        """
+        规范化商家回复内容指纹:去空白后取前8字
+        用于跨屏去重:同一条回复在不同屏可能被节点截断成长度不同的文本,
+        用固定前缀作key,配合 _reply_same 的包含式比较兼容截断差异
+        """
+        return re.sub(r"\s+", "", text or "")[:8]
+
+    def _reply_same(a: str, b: str) -> bool:
+        """两个回复指纹是否同源(兼容截断:较短者是较长者的前缀)"""
+        if not a or not b:
+            return False
+        return a in b or b in a
+
+    def _user_match(a: str, b: str) -> bool:
+        """两个用户名是否同源(互相包含,兼容细节差异);任一为空则不做校验"""
+        a, b = (a or "").strip(), (b or "").strip()
+        if not a or not b:
+            return True
+        return a in b or b in a
+
+    def ensure_on_review_list(xml_str, max_back=2):
+        """
+        确认当前页面仍在评论列表,不在则尝试返回恢复
+        - 严格详情页(星级卡片+回复按钮/商家标签):back()返回
+        - 商店主页(星级卡片+评价(N)tab,无评论筛选栏):back()尝试恢复
+        :return (是否确认在列表, 最新xml)
+        """
+        for _ in range(max_back + 1):
+            if adb.detect_review_detail_page_strict(xml_str):
+                print(f"  [定位] 仍处于评论详情页,执行返回回到列表")
+                adb.back()
+                adb.human_delay(3.0, 4.0)
+                xml_str = adb.dump_ui()
+                continue
+            # 商店主页判定:星级卡片 + "评价(N)" tab,且无评论筛选栏(全部/差评/中评/好评)
+            if adb.detect_review_detail_page(xml_str):
+                items = adb.extract_all_text(xml_str, min_len=1)
+                has_eval_tab = any(re.match(r"^评价\s*\(\d+\)$", it["text"]) for it in items)
+                has_filter = any(it["text"] in ("全部", "差评", "中评", "好评") for it in items)
+                if has_eval_tab and not has_filter:
+                    print(f"  [定位] 已跳出到商店主页,执行返回恢复")
+                    adb.back()
+                    adb.human_delay(3.0, 4.0)
+                    xml_str = adb.dump_ui()
+                    continue
+            return True, xml_str
+        return False, xml_str
 
     # 无限模式:通过识别"已折叠部分评价"文本判定到底;固定模式:按 args.scroll 滑
     FOLD_HINT = "已折叠部分评价"  # 评论列表到底时点评显示的提示文本
@@ -204,15 +273,20 @@ def main():
 
         # 1b. 详情页检测:滑动后可能误进评论详情页(网络卡顿/列表项误触)
         #     详情页特征:同时有评论评分 + 店铺星级卡片,复用本次 dump 不额外消耗
+        #     注意:back()后页面可能还在加载过渡动画,需二次确认避免误判跳出列表页
         if adb.detect_review_detail_page(xml_str):
-            print("  [详情页] 误进评论详情页,执行返回回到列表页")
-            adb.back()
-            adb.human_delay(1.0, 1.5)
-            # 返回后重新 dump 作为后续操作的基准
+            # 二次确认:等待页面加载稳定后再检测,排除过渡动画干扰
+            adb.human_delay(1.5, 2.0)
             xml_str = adb.dump_ui()
-            if FOLD_HINT in xml_str:
-                print(f"  [到底] 返回后识别到'{FOLD_HINT}'提示,评论列表已到底")
-                break
+            if adb.detect_review_detail_page(xml_str):
+                print("  [详情页] 误进评论详情页,执行返回回到列表页")
+                adb.back()
+                adb.human_delay(2.0, 3.0)
+                # 返回后重新 dump 作为后续操作的基准
+                xml_str = adb.dump_ui()
+                if FOLD_HINT in xml_str:
+                    print(f"  [到底] 返回后识别到'{FOLD_HINT}'提示,评论列表已到底")
+                    break
 
         # 1b. 滑动验证码检测(反扒随机弹出,复用本次 dump 不额外消耗)
         try:
@@ -277,12 +351,16 @@ def main():
             xml_str = adb.dump_ui()
             # 检测是否误进评论详情页(小屏设备双击/坐标偏差导致)
             # 详情页特征:同时有评论卡片(评分) + 店铺卡片(星级)
+            # 注意:需二次确认避免误判(列表页加载过渡动画可能残留详情页特征)
             if adb.detect_review_detail_page(xml_str):
-                print("  [展开] 误进评论详情页,执行返回回到列表页")
-                adb.back()
-                adb.human_delay(1.0, 1.5)
+                adb.human_delay(1.5, 2.0)
                 xml_str = adb.dump_ui()
-                break  # 本屏展开结束,用返回后的列表页 xml 继续提取
+                if adb.detect_review_detail_page(xml_str):
+                    print("  [展开] 误进评论详情页,执行返回回到列表页")
+                    adb.back()
+                    adb.human_delay(2.0, 3.0)
+                    xml_str = adb.dump_ui()
+                    break  # 本屏展开结束,用返回后的列表页 xml 继续提取
 
         if expanded > 0:
             print(f"  [展开] 本屏共展开 {expanded} 条全文")
@@ -296,56 +374,110 @@ def main():
         # 3. 结构化解析(记录新增数,用于判断是否滑到底)
         cards = parser.parse(text_items)
 
-        # 3a. 孤立商家回复处理:第一个日期锚点之前的商家回复,属于上一屏最后一条评论
+        # 3a. 差评筛选状态守卫:差评列表的评分只可能是负面档位,
+        #     若出现好评/中性评分,说明已跳出差评筛选(如误触Tab/过度back()),
+        #     列表混入全部评价,需尝试恢复筛选,恢复失败则终止采集
+        POSITIVE_SCORES = {"一般", "好评", "很好", "满意", "超赞",
+                           "还行", "不错", "非常满意", "超预期", "很棒", "还可以"}
+        stray_scores = [c for c in cards if c.get("score") in POSITIVE_SCORES]
+        if stray_scores:
+            stray_users = "、".join(f"{c['user'] or '?'}({c['score']})" for c in stray_scores[:3])
+            print(f"  [守卫] 检测到非差评评分[{stray_users}],疑似已跳出差评列表")
+            # 尝试点击顶部筛选栏"差评"Tab 恢复(筛选栏在顶部 y<320 区域)
+            restored = False
+            for attempt in range(2):
+                tab_items = [it for it in adb.extract_all_text(xml_str, min_len=1)
+                             if it["text"] == "差评" and it["bounds"][1] < 320]
+                if not tab_items:
+                    print(f"  [守卫] 未找到'差评'Tab,尝试返回键恢复")
+                    adb.back()
+                    adb.human_delay(3.0, 4.0)
+                    xml_str = adb.dump_ui()
+                    continue
+                bx = tab_items[0]["bounds"]
+                cx, cy = (bx[0] + bx[2]) // 2, (bx[1] + bx[3]) // 2
+                print(f"  [守卫] 点击'差评'Tab @ ({cx}, {cy}),第{attempt+1}次尝试")
+                adb.tap(cx, cy, human=False)
+                adb.human_delay(3.0, 4.0)
+                xml_str = adb.dump_ui()
+                new_cards = parser.parse(adb.extract_all_text(xml_str, min_len=1))
+                new_stray = [c for c in new_cards if c.get("score") in POSITIVE_SCORES]
+                if not new_stray:
+                    restored = True
+                    cards = new_cards
+                    print(f"  [守卫] 差评筛选已恢复,继续采集")
+                    break
+            if not restored:
+                print(f"  [守卫] 无法恢复差评筛选,终止采集(防止混入好评)")
+                break
+
+        # 3b. 孤立商家回复处理:第一个日期锚点之前的商家回复,属于上一屏最后一条评论
         #     场景:上一条评论全文展开后很长,上划后日期/用户名移出屏幕,
         #     屏幕上只剩内容残余+图片+商家回复,然后是下一条评论。
         #     这条商家回复无法被parser归入当前卡片(无对应日期锚点),
         #     点击进入详情页获取回复日期,补到上一屏最后一条匹配的卡片上
-        # 去重:用回复内容前缀作key,已处理过的孤立回复不再重复点击
-        if not hasattr(main, "_processed_replies"):
-            main._processed_replies = set()
+        # 去重:仅用"已归属到任意卡片"判断(回复内容前8字指纹,包含式兼容截断);
+        #     不做"已点击过"记录,避免同前缀的不同回复被误拦(不同评论的回复常以"亲爱的顾客"开头)
         if hasattr(parser, "leading_replies") and parser.leading_replies:
             print(f"  [商家回复] 检测到 {len(parser.leading_replies)} 条孤立商家回复(属于上一屏评论)")
             _, screen_h = adb.get_screen_size()
             y_max = int(screen_h * 0.90)
-            for reply_text in parser.leading_replies:
-                # 跳过已处理的回复(用内容前缀去重)
+            lead_items = getattr(parser, "leading_reply_items", None) or []
+            for k, reply_text in enumerate(parser.leading_replies):
+                # 回复内容指纹(去空白取前8字)
                 prefix_m = re.match(r'^(?:商家回复|.+?[（(]商家[）)]|商家)\s*[:：]\s*', reply_text)
-                reply_key = reply_text[prefix_m.end():prefix_m.end() + 30] if prefix_m else reply_text[:30]
-                if reply_key in main._processed_replies:
-                    print(f"  [商家回复] 该孤立回复已处理过,跳过")
+                content = reply_text[prefix_m.end():] if prefix_m else reply_text
+                fp = _reply_fingerprint(content)
+                if not fp:
                     continue
-                # 跳过上一屏卡片已有回复日期的情况(避免重复补全)
-                if summarizer.cards and summarizer.cards[-1].get("merchant_reply_date", "").strip():
-                    print(f"  [商家回复] 上一屏卡片已有回复日期,跳过孤立回复处理")
+                # 该回复已归属到任意卡片则跳过(防跨屏残留被误补到别的卡片)
+                if any(_reply_same(fp, _reply_fingerprint(c.get("merchant_reply") or ""))
+                       for c in summarizer.cards):
+                    print(f"  [商家回复] 该孤立回复已补全到评论,跳过")
                     continue
-                candidates = find_reply_candidates(xml_str, reply_text, y_max)
+                # 精确定位:优先用解析器记录的回复节点坐标(避免模糊匹配误点其他回复)
+                candidates = []
+                if k < len(lead_items):
+                    bx1, by1, bx2, by2 = lead_items[k]["bounds"]
+                    cy = (by1 + by2) // 2
+                    if cy > int(h * 0.16):  # 顶部导航/搜索区点击无效,放弃精确定位
+                        candidates = [{"text": lead_items[k]["text"],
+                                       "center": ((bx1 + bx2) // 2, cy)}]
+                if not candidates:
+                    candidates = find_reply_candidates(xml_str, reply_text, y_max)
                 if not candidates:
                     print(f"  [商家回复] 未在XML中找到孤立回复元素,跳过")
                     continue
-                entered, reply_date = get_reply_date_from_detail(candidates)
-                main._processed_replies.add(reply_key)  # 标记已处理
+                entered, reply_date, detail_user = get_reply_date_from_detail(candidates)
                 if not entered:
                     print(f"  [商家回复] 孤立回复所有候选均未进入详情页,跳过")
                     continue
                 if not reply_date:
                     print(f"  [商家回复] 孤立回复已进入详情页,但未找到回复日期")
                     continue
-                # 补到上一屏最后一条卡片(第一条评论很长,商家回复在下方滚出后才看到,
-                # 上一屏采集时 merchant_reply 为空,这里同时补上 merchant_reply 和日期)
-                matched = False
-                if summarizer.cards:
-                    card = summarizer.cards[-1]
-                    card["merchant_reply"] = reply_text
-                    card["merchant_reply_date"] = reply_date
-                    print(f"  [商家回复] 补全上一屏评论: {reply_date} -> [{card['user']}] {card['date']}")
-                    matched = True
-                if not matched:
+                # 补到上一屏最后一条还没有商家回复的卡片(孤立回复必定紧跟该卡片内容)
+                target = None
+                for c in reversed(summarizer.cards):
+                    if not (c.get("merchant_reply") or "").strip():
+                        target = c
+                        break
+                if target is None:
                     print(f"  [商家回复] 无上一屏卡片可补全,跳过")
-            # 处理孤立回复后重新dump,因为详情页back()可能改变页面状态
-            xml_str = adb.dump_ui()
+                    continue
+                # 详情页评论者校验:点进的详情页须与目标卡片同人,防止把别的回复误补过来
+                if detail_user and not _user_match(detail_user, target.get("user")):
+                    print(f"  [商家回复] 详情页评论者[{detail_user}]与目标[{target.get('user')}]不符,放弃补全")
+                    continue
+                target["merchant_reply"] = reply_text
+                target["merchant_reply_date"] = reply_date
+                print(f"  [商家回复] 补全上一屏评论: {reply_date} -> [{target['user']}] {target['date']}")
+            # 处理孤立回复后确认仍在评论列表(详情页back()可能改变页面状态)
+            list_ok, xml_str = ensure_on_review_list(xml_str)
+            if not list_ok:
+                print(f"  [定位] 评论列表状态丢失,恢复失败,终止采集")
+                break
 
-        # 3b. 用户名缺失补救:滑动过快可能导致用户名滚出上边界未被抓到
+        # 3c. 用户名缺失补救:滑动过快可能导致用户名滚出上边界未被抓到
         #     强制多次小幅下滑,直到获取用户名或达到最大重试次数(不保存空用户名)
         missing_user = [c for c in cards if not c.get("user", "").strip()]
         if missing_user:
@@ -382,39 +514,73 @@ def main():
                 for c in final_missing:
                     c["_skip_empty_user"] = True  # 标记跳过
 
-        # 3c. 商家回复日期获取:有商家回复的卡片,点击进入详情页获取回复日期
-        #     点击策略:优先点"XX(商家)"标签节点;回退到回复内容前缀匹配;多候选按Y升序依次尝试
+        # 3d. 商家回复日期获取:有商家回复的卡片,点击进入详情页获取回复日期
+        #     点击策略:优先用解析器记录的回复节点坐标(精确定位);回退到模糊匹配
         #     详情页回复日期可能在屏幕下方,首次提取为空时下滑一次重试
         #     注意:本地cards的修改不会自动同步到summarizer.cards(去重时本地副本被丢弃),
         #     需通过dedup_key找到summarizer中的对应卡片同步修改
-        cards_with_reply = [c for c in cards if c.get("merchant_reply", "").strip()]
+        #     已取到回复日期的卡片跳过,避免同一条回复跨屏反复点击
+        cards_with_reply = [
+            c for c in cards
+            if c.get("merchant_reply", "").strip()
+            and not (c.get("merchant_reply_date") or "").strip()
+        ]
         if cards_with_reply:
             print(f"  [商家回复] {len(cards_with_reply)} 条有商家回复,进入详情页获取回复日期")
             _, screen_h = adb.get_screen_size()
             y_max = int(screen_h * 0.90)
             for card in cards_with_reply:
-                candidates = find_reply_candidates(xml_str, card["merchant_reply"], y_max)
+                # 汇总中该卡片已有回复日期则跳过(3a补全或上一屏已获取)
+                dedup_key = summarizer._dedup_key(card)
+                if any(sc.get("merchant_reply_date")
+                       and summarizer._dedup_key(sc) == dedup_key
+                       for sc in summarizer.cards):
+                    print(f"  [商家回复] 该卡片回复日期已获取,跳过")
+                    continue
+                # 精确定位:优先用解析器记录的回复节点坐标
+                candidates = []
+                r_bounds = card.get("merchant_reply_bounds")
+                if r_bounds:
+                    bx1, by1, bx2, by2 = r_bounds
+                    cy = (by1 + by2) // 2
+                    if cy < y_max and cy > int(h * 0.16):
+                        candidates = [{"text": card["merchant_reply"],
+                                       "center": ((bx1 + bx2) // 2, cy)}]
+                if not candidates:
+                    candidates = find_reply_candidates(xml_str, card["merchant_reply"], y_max)
                 if not candidates:
                     print(f"  [商家回复] 未在XML中找到可点击的回复元素,跳过")
                     continue
-                entered, reply_date = get_reply_date_from_detail(candidates)
-                if entered and reply_date:
-                    card["merchant_reply_date"] = reply_date
-                    print(f"  [商家回复] 回复日期: {reply_date}")
-                    # 同步到summarizer.cards中的对应卡片(去重后保留的是旧卡片,需同步修改)
-                    dedup_key = summarizer._dedup_key(card)
-                    for sc in summarizer.cards:
-                        if summarizer._dedup_key(sc) == dedup_key:
-                            sc["merchant_reply"] = card["merchant_reply"]
-                            sc["merchant_reply_date"] = reply_date
-                            break
-                elif entered:
-                    print(f"  [商家回复] 已进入详情页,但未找到回复日期")
-                else:
+                entered, reply_date, detail_user = get_reply_date_from_detail(candidates, card.get("user"))
+                if not entered:
                     print(f"  [商家回复] 所有候选均未进入详情页,跳过本条")
+                    continue
+                # 详情页评论者校验:点进的详情页须与卡片同人,防止取到别的回复的日期
+                if detail_user and not _user_match(detail_user, card.get("user")):
+                    print(f"  [商家回复] 详情页评论者[{detail_user}]与卡片[{card.get('user')}]不符,放弃日期")
+                    continue
+                if not reply_date:
+                    print(f"  [商家回复] 已进入详情页,但未找到回复日期")
+                    continue
+                card["merchant_reply_date"] = reply_date
+                print(f"  [商家回复] 回复日期: {reply_date}")
+                # 同步到summarizer.cards中的对应卡片(去重后保留的是旧卡片,需同步修改)
+                for sc in summarizer.cards:
+                    if summarizer._dedup_key(sc) == dedup_key:
+                        sc["merchant_reply"] = card["merchant_reply"]
+                        sc["merchant_reply_date"] = reply_date
+                        break
+            # 处理回复后确认仍在评论列表(详情页back()可能改变页面状态)
+            list_ok, xml_str = ensure_on_review_list(xml_str)
+            if not list_ok:
+                print(f"  [定位] 评论列表状态丢失,恢复失败,终止采集")
+                break
 
         # 过滤掉标记跳过的卡片(空用户名且重试失败)
         valid_cards = [c for c in cards if not c.get("_skip_empty_user")]
+        # 回复节点坐标仅用于点击取日期,不写入报告
+        for c in valid_cards:
+            c.pop("merchant_reply_bounds", None)
         skipped = len(cards) - len(valid_cards)
         before = len(summarizer.cards)
         result = {"cards": valid_cards, "review_count": len(valid_cards), "source": "native"}

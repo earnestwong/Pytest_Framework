@@ -182,15 +182,26 @@ class ADBHelper:
 
     # ---------- uiautomator ----------
 
-    def dump_ui(self, save_path: Optional[str] = None, retries: int = 3) -> str:
+    def dump_ui(self, save_path: Optional[str] = None, retries: int = 5) -> str:
         """
         dump 当前 UI 层级为 XML
         原生页面文本可直接从 XML 提取;若遇到 WebView/H5 渲染则文本缺失,需走 OCR
         注意:uiautomator dump 常返回非零退出码但实际已成功,此处忽略退出码直接验证文件内容
+        关键:每次 dump 前先删除旧文件,避免 dump 失败时 cat 读到上次残留 XML 导致误判
         """
         remote = "/sdcard/ui_dump.xml"
         last_err = None
         for attempt in range(retries):
+            # 先删除旧文件,确保 cat 读到的一定是本次 dump 的结果
+            # (否则 dump 失败时 cat 会读到上次残留 XML,误判为成功)
+            subprocess.run(
+                self._base_cmd + ["shell", f"rm -f {remote}"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                encoding="utf-8",
+                errors="ignore",
+            )
             # dump 命令忽略退出码(uiautomator dump 即使成功也可能返回非零)
             subprocess.run(
                 self._base_cmd + ["shell", f"uiautomator dump {remote}"],
@@ -201,7 +212,7 @@ class ADBHelper:
                 errors="ignore",
             )
             time.sleep(0.5)
-            # 读取文件内容(忽略退出码,文件可能不存在)
+            # 读取文件内容(文件不存在则 cat 返回空,触发重试)
             cat = subprocess.run(
                 self._base_cmd + ["shell", f"cat {remote}"],
                 capture_output=True,
@@ -218,7 +229,16 @@ class ADBHelper:
                         f.write(xml_str)
                 return xml_str
             last_err = f"dump 返回空或非 XML(stdout_len={len(xml_str)}, stderr={cat.stderr.strip()[:80]})"
-            time.sleep(1.5)
+            # uiautomator 服务偶发挂起:杀掉进程强制重启后再重试
+            try:
+                subprocess.run(
+                    self._base_cmd + ["shell", "pkill -f uiautomator"],
+                    capture_output=True, text=True, timeout=5,
+                    encoding="utf-8", errors="ignore",
+                )
+            except Exception:
+                pass
+            time.sleep(3.0)
         raise RuntimeError(f"uiautomator dump 失败(重试 {retries} 次): {last_err}")
 
     def find_elements_by_text(self, xml_str: str, text: str) -> List[Dict]:
@@ -386,15 +406,60 @@ class ADBHelper:
     def detect_review_detail_page(self, xml_str: str) -> bool:
         """
         检测是否在评论详情页
-        详情页独有特征:店铺星级卡片(如"· 3.3 星"),评论列表页不会出现此元素
-        :return True=在详情页(需 back 返回);False=在列表页
+        详情页标志(任一命中即判定,兼容长详情页星级卡片滚出屏幕的情况):
+          - 店铺星级卡片("· 3.3 星"):详情页顶部店铺卡
+          - "发条友善评论吧":详情页评论区输入框(列表页为"说点什么吧~",不命中)
+          - "这条评价内容有帮助吗":详情页独有
+          - "发布于X月X日":详情页发布时间(列表页仅日期无前缀)
+          - "X月X日 时:分":详情页评论/回复带时间(列表页日期无时间)
+          - 顶部(y<250)同时有"分享"和"更多":详情页导航(列表页顶部为 规则/评价/搜索)
+        :return True=在详情页(需 back 返回);False=不在详情页
         """
         root = ET.fromstring(xml_str)
+        texts = []
+        top_texts = []
         for node in root.iter("node"):
             text = (node.attrib.get("text", "") + node.attrib.get("content-desc", "")).strip()
-            if text and self._SHOP_STAR_PAT.search(text):
+            if not text:
+                continue
+            if self._SHOP_STAR_PAT.search(text):
                 return True
+            texts.append(text)
+            bounds = node.attrib.get("bounds", "")
+            coords = bounds.replace("][", ",").strip("[]").split(",")
+            if len(coords) == 4:
+                try:
+                    if int(coords[1]) < 250:  # 顶部导航栏区域
+                        top_texts.append(text)
+                except ValueError:
+                    pass
+        joined = "|".join(texts)
+        if "发条友善评论吧" in joined:
+            return True
+        if "这条评价内容有帮助吗" in joined:
+            return True
+        if re.search(r"发布于\s*\d{1,2}月\d{1,2}日", joined):
+            return True
+        if self._REPLY_DATE_PAT.search(joined):
+            return True
+        if any("分享" in t for t in top_texts) and any("更多" in t for t in top_texts):
+            return True
         return False
+
+    def detect_review_detail_page_strict(self, xml_str: str) -> bool:
+        """
+        严格判定评论详情页(用于 back() 后验证是否已回到列表,防止过度返回)
+        详情页 = 店铺星级卡片 + (回复按钮 或 商家标签)
+        商店主页虽也有星级卡片,但没有"回复"按钮/商家标签,
+        用此方法可区分,避免把商店页误判为详情页再次 back() 把评论列表也退出
+        :return True=确定仍在评论详情页
+        """
+        if not self.detect_review_detail_page(xml_str):
+            return False
+        items = self.extract_all_text(xml_str, min_len=1)
+        has_reply_btn = any(it["text"] == "回复" for it in items)
+        has_merchant = any("（商家）" in it["text"] or "(商家)" in it["text"] for it in items)
+        return has_reply_btn or has_merchant
 
     # 商家回复日期格式:8月11日  11:08 / 2025年8月11日  11:08 / 2025-08-11 11:08
     _REPLY_DATE_PAT = re.compile(
@@ -405,28 +470,65 @@ class ADBHelper:
     def extract_merchant_reply_date(self, xml_str: str) -> str:
         """
         从评论详情页提取商家回复日期
-        详情页结构:... 商家标签(如"丰裕（商家）") → 回复内容 → 回复日期(带时间) → 回复按钮
+        详情页结构:评论者 → 其他用户评论(带日期时间) → 丰裕（商家）→ 商家回复内容 → 回复日期(带时间) → 回复按钮
+        只取"（商家）"标签之后的日期,排除其他用户评论的日期
+        若有多条商家回复,取最早的一条回复日期
         :return 日期原始文本(由调用方标准化),未找到返回空串
         """
         items = self.extract_all_text(xml_str, min_len=1)
-        # 找到"商家"标签位置(如"丰裕（商家）")
-        merchant_idx = -1
+        dates = []  # 收集所有商家回复的日期
         for i, it in enumerate(items):
             text = it["text"]
-            if "（商家）" in text or "(商家)" in text:
-                merchant_idx = i
-                break
-        if merchant_idx == -1:
+            if "（商家）" not in text and "(商家)" not in text:
+                continue
+            # 从商家标签后找日期:商家回复日期在回复内容与"回复"按钮之间
+            for j in range(i + 1, len(items)):
+                t = items[j]["text"]
+                if "（商家）" in t or "(商家)" in t:
+                    break  # 下一条商家回复,本段结束
+                m = self._REPLY_DATE_PAT.search(t)
+                if m:
+                    dates.append(m.group(1))  # 日期部分(不含时间)
+                    break
+                if t == "回复":
+                    break  # 本段未找到日期则结束,避免越界到其他用户评论
+        if not dates:
             return ""
-        # 从商家标签后找"日期+时间"格式文本(回复日期在回复内容和"回复"按钮之间)
-        for i in range(merchant_idx + 1, len(items)):
-            text = items[i]["text"]
-            m = self._REPLY_DATE_PAT.search(text)
+        # 取最早:优先带年份完整日期,其次"X月X日"
+        def _key(d):
+            m = re.match(r"^(\d{4})年?(\d{1,2})月(\d{1,2})日$", d)
             if m:
-                return m.group(1)  # 返回日期部分(不含时间,时间由调用方丢弃)
-            # 遇到"回复"按钮就停(日期在回复按钮之前)
-            if items[i]["text"] == "回复":
-                break
+                return int(m.group(1)) * 10000 + int(m.group(2)) * 100 + int(m.group(3))
+            m = re.match(r"^(\d{1,2})月(\d{1,2})日$", d)
+            if m:
+                return int(m.group(1)) * 100 + int(m.group(2))
+            m = re.match(r"^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$", d)
+            if m:
+                return int(m.group(1)) * 10000 + int(m.group(2)) * 100 + int(m.group(3))
+            return 0
+        dates.sort(key=_key)
+        return dates[0]
+
+    # 详情页顶部区域的噪声节点(非评论者用户名)
+    _DETAIL_TOP_NOISE = {"返回", "分享", "更多", "关注", "头像", "收藏"}
+
+    def extract_detail_user(self, xml_str: str) -> str:
+        """
+        提取评论详情页顶部的评论者用户名(用于校验点进的是否目标评论)
+        详情页顶部结构: 返回/分享/更多 → 头像 → 用户名(评论者)
+        :return 用户名,未找到返回空串
+        """
+        items = self.extract_all_text(xml_str, min_len=1)
+        for it in items:
+            bx = it["bounds"]
+            if bx[1] >= 300:
+                break  # 已超出顶部区域(节点按y升序),未找到用户名
+            text = it["text"]
+            if text in self._DETAIL_TOP_NOISE:
+                continue
+            if len(text) > 20:  # 用户名不会太长(可能是正文等)
+                continue
+            return text
         return ""
 
     # ---------- 截图 ----------

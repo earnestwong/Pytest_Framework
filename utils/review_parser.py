@@ -47,6 +47,7 @@ class ReviewParser:
         "已收藏", "打卡", "写评价",  # 底部操作栏
         "查看全部", "顶部查看全部",
         "搜索栏", "返回", "收藏", "分享", "更多",
+        "搜索评价内容",  # 列表页顶部搜索框占位文本(易被误认作用户名)
         "gridView_item_wrapper",
     }
 
@@ -87,11 +88,13 @@ class ReviewParser:
         #   屏幕上只剩内容残余+图片+商家回复,然后是下一条评论。
         #   这条商家回复属于上一屏最后一条评论,记录到 leading_replies 供调用方处理
         self.leading_replies = []
+        self.leading_reply_items = []  # 与 leading_replies 一一对应,含屏幕坐标(bounds)
         if date_idxs:
             first_d = date_idxs[0]
             for i in range(first_d):
                 if self.MERCHANT_PAT.match(valid[i]["text"]):
                     self.leading_replies.append(valid[i]["text"])
+                    self.leading_reply_items.append(valid[i])
 
         # 第3步:按日期锚点切分并解析每张卡片
         # 注意:MuMu 顺序下「用户名→日期」,下一张的用户名会落在当前卡片范围内,
@@ -147,6 +150,7 @@ class ReviewParser:
         card = {
             "user": "", "date": items[d_idx]["text"], "score": "",
             "content": "", "avg_price": "", "merchant_reply": "",
+            "merchant_reply_bounds": "",
         }
 
         # 1. 找用户名:
@@ -181,9 +185,10 @@ class ReviewParser:
                 continue
             text = items[j]["text"]
 
-            # 商家回复
+            # 商家回复(记录坐标,供点击进入详情页取回复日期)
             if self.MERCHANT_PAT.match(text):
                 card["merchant_reply"] = text
+                card["merchant_reply_bounds"] = items[j]["bounds"]
                 continue
 
             # 人均
@@ -246,9 +251,11 @@ class ReviewParser:
                 if current and current.get("content"):
                     cards.append(current)
                 current = {"user": "", "date": text, "score": "",
-                           "content": "", "avg_price": "", "merchant_reply": ""}
+                           "content": "", "avg_price": "", "merchant_reply": "",
+                           "merchant_reply_bounds": ""}
             elif self.MERCHANT_PAT.match(text) and current:
                 current["merchant_reply"] = text
+                current["merchant_reply_bounds"] = item["bounds"]
             elif current:
                 # 先尝试提取人均
                 price_match = self.PRICE_PAT.match(text)
