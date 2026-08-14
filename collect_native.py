@@ -140,8 +140,9 @@ def main():
                 print(f"  [商家回复] 本次点击未进入详情页,尝试下一个候选")
                 adb.human_delay(0.5, 1.0)
                 continue
-            # 复合身份信息:用户名+发布日期+内容前缀(一次性提取,避免多次解析XML)
+            # 复合身份信息:用户名+发布日期+内容前缀+商家回复全文(一次性提取,避免多次解析XML)
             detail_info = adb.extract_detail_comment_info(detail_xml)
+            detail_info["merchant_reply"] = adb.extract_detail_merchant_reply(detail_xml)
             # 复合身份校验(传了card时):匹配失败直接back继续下一个候选,
             # 不浪费下滑重试(用户名都不对,找日期无意义)
             if card is not None:
@@ -157,6 +158,35 @@ def main():
                     continue
             reply_date = adb.extract_merchant_reply_date(detail_xml)
             w, h = adb.get_screen_size()
+            # 0. 商家回复区加载失败(详情页显示"点击重试"占位)时,先点击重试重新加载
+            #    否则日期/回复段都为空,会误判为"点错"而丢失本可拿到的日期
+            for _ in range(2):
+                if reply_date:
+                    break
+                retry_btns = [b for b in adb.find_elements_by_text(detail_xml, "点击重试")
+                              if int(h * 0.15) < b["center"][1] < int(h * 0.9)]
+                if not retry_btns:
+                    break
+                print(f"  [商家回复] 详情页回复区加载失败,点击'点击重试'重新加载")
+                adb.tap(*retry_btns[0]["center"], human=False)
+                adb.human_delay(2.0, 3.0)
+                detail_xml = adb.dump_ui()
+                reply_date = adb.extract_merchant_reply_date(detail_xml)
+                if not detail_info.get("merchant_reply"):
+                    detail_info["merchant_reply"] = adb.extract_detail_merchant_reply(detail_xml)
+            # 1. 详情页确实无商家回复段(非加载失败:点中评论图片进大图页,或该评论无回复):
+            #    继续下滑重试无意义,直接back尝试下一个候选
+            if not reply_date and not detail_info.get("merchant_reply") \
+                    and "（商家）" not in detail_xml and "(商家)" not in detail_xml \
+                    and "点击重试" not in detail_xml:
+                print(f"  [商家回复] 详情页无商家回复段(疑似点错),尝试下一个候选")
+                adb.back()
+                adb.human_delay(3.0, 4.0)
+                check_xml = adb.dump_ui()
+                list_ok, check_xml = ensure_on_review_list(check_xml)
+                if not list_ok:
+                    print(f"  [商家回复] back()后评论列表状态丢失,恢复失败")
+                continue
             for _ in range(3):
                 if reply_date:
                     break
@@ -172,6 +202,8 @@ def main():
                         "user": detail_info.get("user") or new_info.get("user", ""),
                         "date": detail_info.get("date") or new_info.get("date", ""),
                         "content_prefix": detail_info.get("content_prefix") or new_info.get("content_prefix", ""),
+                        "merchant_reply": detail_info.get("merchant_reply")
+                        or adb.extract_detail_merchant_reply(detail_xml),
                     }
             adb.back()  # 返回列表页
             adb.human_delay(3.0, 4.0)  # 等待页面加载稳定,避免过渡动画误判
@@ -207,19 +239,23 @@ def main():
             return (b["center"][1],)
 
         prefix_m = re.match(r'^(?:商家回复|.+?[（(]商家[）)]|商家)\s*[:：]\s*', reply_text)
-        # 1. 优先:用回复内容前15字符精确匹配(定位到具体哪条回复)
+        # 1. 优先:用回复内容前40字精确匹配(定位到具体哪条回复)
+        #    多个回复常以"亲爱的顾客/尊敬的顾客"开头,15字不足以区分,
+        #    40字后不同回复内容差异明显,能精确定位到正确回复节点
         if prefix_m:
-            search_text = reply_text[prefix_m.end():prefix_m.end() + 15]
+            search_text = reply_text[prefix_m.end():prefix_m.end() + 40]
             candidates = [b for b in adb.find_elements_by_text(xml, search_text)
                           if y_min < b["center"][1] < y_max
-                          and "语音评价" not in b["text"]]
+                          and "语音评价" not in b["text"]
+                          and "图片" not in b["text"] and "播放" not in b["text"]]
             if candidates:
                 candidates.sort(key=_sort_key)
                 return candidates
         # 2. 回退:搜索"XX(商家)"标签节点(列表页合并节点如"丰裕(商家): xxx")
         candidates = [b for b in adb.find_elements_by_text(xml, reply_text[:20])
                       if y_min < b["center"][1] < y_max
-                      and "语音评价" not in b["text"]]
+                      and "语音评价" not in b["text"]
+                      and "图片" not in b["text"] and "播放" not in b["text"]]
         if candidates:
             candidates.sort(key=_sort_key)
             return candidates
@@ -227,6 +263,7 @@ def main():
         candidates = [b for b in adb.find_elements_by_text(xml, "商家")
                       if ("（商家）" in b["text"] or "(商家)" in b["text"])
                       and "语音评价" not in b["text"]
+                      and "图片" not in b["text"] and "播放" not in b["text"]
                       and y_min < b["center"][1] < y_max]
         candidates.sort(key=_sort_key)
         return candidates
@@ -247,21 +284,24 @@ def main():
 
     def _composite_match(detail_info, card):
         """
-        复合身份匹配:结合用户名、评论日期、评论内容前缀判断详情页与列表页卡片是否同人
+        复合身份匹配:精确匹配 用户名 + 评论时间 + 商家回复全文,判断详情页与列表页卡片是否同人
 
-        场景:匿名用户用户名相同(如多个"匿名用户"),仅靠用户名无法区分归属,
-             需结合评论日期和内容前缀确认。
+        简化原则(按需求):正常采集路径卡片都有商家回复内容,
+          商家回复全文是最强归属标识——详情页回复内容与卡片回复内容一致即确认点对;
+          全文不匹配则拒绝,避免"仅日期相同"导致误配(同一屏相邻评论日期常相同)。
+          3b孤立回复补全场景卡片无回复内容时,退回 用户名+评论日期+内容前缀 判断。
 
         匹配规则(优先级从高到低):
-          1. 用户名明确不同(非匿名) → 直接拒绝
-          2. 内容前缀匹配 → 通过(内容是最稳定标识,即使匿名同名内容也大概率不同)
-          3. 日期匹配 → 通过(次要依据,容忍"发布于"前缀)
-          4. 匿名同名(都是"匿名用户")但内容/日期都不匹配 → 拒绝(不同评论的重名匿名用户)
-          5. 非匿名同名且无内容/日期信息 → 通过(列表页用户名已能区分)
-          6. 详情页信息缺失 → 通过(向后兼容,由调用方决定是否信任)
+          1. 用户名明确不同(双非匿名) → 直接拒绝
+          2. 商家回复全文匹配 → 通过(详情页回复提取成功时强校验,不一致即拒绝)
+          3. 内容前缀匹配 → 通过(仅卡片无回复/详情页回复提取失败时使用)
+          4. 日期匹配 → 仅当用户名关系可接受(双匿名/同名/详情页用户名缺失)时通过;
+             匿名 vs 非匿名不同名时即使日期相同也拒绝(防误配)
+          5. 匿名同名 → 拒绝(宁缺毋滥)
+          6. 非匿名同名 → 放行
 
-        :param detail_info: 详情页提取的 {'user', 'date', 'content_prefix'}
-        :param card: 列表页卡片 {'user', 'date', 'content', ...}
+        :param detail_info: 详情页提取的 {'user', 'date', 'content_prefix', 'merchant_reply'}
+        :param card: 列表页卡片 {'user', 'date', 'content', 'merchant_reply', ...}
         :return (是否匹配, 不匹配原因)
         """
         if not detail_info:
@@ -270,13 +310,17 @@ def main():
         d_user = (detail_info.get("user") or "").strip()
         d_date = (detail_info.get("date") or "").strip()
         d_content = (detail_info.get("content_prefix") or "").strip()
+        d_reply = (detail_info.get("merchant_reply") or "").strip()
         c_user = (card.get("user") or "").strip()
         c_date = (card.get("date") or "").strip()
         c_content = (card.get("content") or "").strip()
+        c_reply = (card.get("merchant_reply") or "").strip()
 
         def _is_anon(name):
             """匿名用户:空串或含"匿名"字样(大众点评匿名用户名恒为"匿名用户")"""
             return not name or "匿名" in name
+
+        _strip_reply_label = re.compile(r'^(?:商家回复|.+?[（(]商家[）)]|商家)\s*[:：]\s*')
 
         # 1. 用户名明确不同(非匿名) → 直接拒绝
         if (d_user and c_user
@@ -285,7 +329,20 @@ def main():
                 and d_user not in c_user and c_user not in d_user):
             return False, f"用户名不同[{d_user}≠{c_user}]"
 
-        # 2. 内容前缀匹配 → 通过(去空白/占位符取前15字比较,容忍截断/省略号差异)
+        # 2. 商家回复全文匹配(卡片有回复内容时) → 通过
+        #    去前缀标签("XX(商家):")与空白/占位符后做包含匹配,容忍列表页截断差异
+        if c_reply:
+            norm_d = re.sub(r"[\s\uFFFC\uFFFD]+", "", _strip_reply_label.sub("", d_reply))
+            norm_c = re.sub(r"[\s\uFFFC\uFFFD]+", "", _strip_reply_label.sub("", c_reply))
+            if norm_d:
+                # 详情页回复提取成功 → 强校验,全文不一致即拒绝(宁缺毋滥)
+                if len(norm_d) >= 10 and len(norm_c) >= 10 \
+                        and (norm_d in norm_c or norm_c in norm_d):
+                    return True, ""
+                return False, f"商家回复全文不匹配(详情[{norm_d[:15]}]vs卡片[{norm_c[:15]}])"
+            # norm_d 为空:详情页回复提取失败,降级到规则3/4(用户名+日期+内容前缀)
+
+        # 3. 内容前缀匹配 → 通过(去空白/占位符取前15字比较,容忍截断/省略号差异)
         #    注意:"￼"(U+FFFC,图片/emoji占位符)在详情页提取时可能被去掉、
         #    卡片解析时保留,导致[:15]截断后字符错位,必须先去除再比较
         if d_content and c_content:
@@ -294,19 +351,22 @@ def main():
             if norm_d and norm_c and (norm_d in norm_c or norm_c in norm_d):
                 return True, ""
 
-        # 3. 日期匹配 → 通过("发布于"前缀已在提取时去除,直接比较)
+        # 4. 日期匹配 → 仅当用户名关系可接受时通过("发布于"前缀已在提取时去除)
         if d_date and c_date:
             if d_date == c_date or d_date in c_date or c_date in d_date:
-                return True, ""
+                if (not d_user  # 详情页用户名缺失
+                        or (_is_anon(d_user) and _is_anon(c_user))  # 双匿名
+                        or (d_user and c_user and d_user == c_user)):  # 同名(含非匿名)
+                    return True, ""
+                return False, f"用户名不一致[{d_user}≠{c_user}]但日期相同,拒绝(防误配)"
 
-        # 4. 匿名同名 → 拒绝(用户名恒为"匿名用户",无内容/日期佐证即无法区分归属)
-        #    注意:规则2/3已先试过内容、日期匹配,走到这里说明都不匹配或信息缺失。
+        # 5. 匿名同名 → 拒绝(用户名恒为"匿名用户",无内容/日期/回复佐证即无法区分归属)
         #    详情页信息不完整(如只有匿名用户名)时也在此拒绝,宁缺毋滥——
         #    否则会误接受其他评论详情页的回复日期(如把下一条评论的日期归属到本卡片)
         if _is_anon(d_user) and _is_anon(c_user):
-            return False, f"匿名同名但内容/日期均不匹配(内容[{d_content[:10]}]vs[{c_content[:10]}],日期[{d_date}]vs[{c_date}])"
+            return False, f"匿名同名但内容/日期/回复均不匹配(内容[{d_content[:10]}]vs[{c_content[:10]}],日期[{d_date}]vs[{c_date}])"
 
-        # 5. 非匿名同名无辅助信息 → 放行
+        # 6. 非匿名同名无辅助信息 → 放行
         return True, ""
 
     def ensure_on_review_list(xml_str, max_back=2):

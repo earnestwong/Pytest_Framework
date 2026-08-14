@@ -527,6 +527,46 @@ class ADBHelper:
         dates.sort(key=_key)
         return dates[0]
 
+    def extract_detail_merchant_reply(self, xml_str: str) -> str:
+        """
+        从评论详情页提取第一条(最新)商家回复的完整内容
+        用于与列表页卡片 merchant_reply 做精确匹配(回复全文是最强归属标识)
+        详情页结构:... → XX（商家）→ 回复内容1 → 回复日期 → [下一条回复...] → 回复按钮
+        :return 去前缀标签/去空白占位符的回复全文;未找到返回空串
+        """
+        items = self.extract_all_text(xml_str, min_len=1)
+        # 商家标签可能带店铺名前缀,如"丰裕（商家）: 尊敬的顾客..."
+        strip_pat = re.compile(r'^(?:[^:：]{0,10}[（(]商家[）)])\s*[:：]?\s*')
+        for i, it in enumerate(items):
+            text = it["text"]
+            if "（商家）" not in text and "(商家)" not in text:
+                continue
+            parts = []
+            rest = strip_pat.sub("", text)  # 标签节点若已合并回复内容
+            if rest:
+                parts.append(rest)
+            for j in range(i + 1, len(items)):
+                t = items[j]["text"]
+                if "（商家）" in t or "(商家)" in t:
+                    break  # 下一条商家回复,本段结束
+                if t == "回复":
+                    break  # 回复按钮,本段结束
+                if (self._REPLY_DATE_PAT.search(t)
+                        or self._MERCHANT_REPLY_DATE_ONLY_PAT.search(t)
+                        or self._MERCHANT_REPLY_REL_PAT.search(t)):
+                    break  # 到达回复日期节点,本段结束
+                if not t.strip():
+                    continue
+                # 过滤详情页噪声节点(头像/用户昵称等非回复内容)
+                if t in ("头像",) or "用户昵称" in t:
+                    continue
+                parts.append(t)
+            content = "".join(parts)
+            content = re.sub(r"[\s\uFFFC\uFFFD]+", "", content)
+            if len(content) >= 10:
+                return content
+        return ""
+
     # 详情页顶部区域的噪声节点(非评论者用户名)
     _DETAIL_TOP_NOISE = {"返回", "分享", "更多", "关注", "头像", "收藏", "语音评价",
                          "说点什么吧~", "说点什么吧～", "发条友善评论吧～", "喜欢就评论一下吧～"}
@@ -550,6 +590,9 @@ class ADBHelper:
                 continue
             # 输入框占位符(如"说点什么吧~"/"发条友善评论吧～")非用户名
             if "评论吧" in text or "说点什么" in text:
+                continue
+            # 图片/视频节点(如"图片01"/"播放")非用户名,大图浏览页常以它们开头
+            if re.match(r"^图片\d*$", text) or "播放" in text:
                 continue
             if len(text) > 20:  # 用户名不会太长(可能是正文等)
                 continue
