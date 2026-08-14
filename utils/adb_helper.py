@@ -466,6 +466,10 @@ class ADBHelper:
         r'(\d{4}年\d{1,2}月\d{1,2}日|\d{1,2}月\d{1,2}日|\d{4}[-/.]\d{1,2}[-/.]\d{1,2})'
         r'\s+\d{1,2}:\d{2}'
     )
+    # 商家回复日期(不带时间):较老的回复详情页只显示日期不显示具体时间,如"2025年9月30日"
+    _MERCHANT_REPLY_DATE_ONLY_PAT = re.compile(
+        r'^(\d{4}年\d{1,2}月\d{1,2}日|\d{1,2}月\d{1,2}日|\d{4}[-/.]\d{1,2}[-/.]\d{1,2})$'
+    )
 
     def extract_merchant_reply_date(self, xml_str: str) -> str:
         """
@@ -489,6 +493,10 @@ class ADBHelper:
                 m = self._REPLY_DATE_PAT.search(t)
                 if m:
                     dates.append(m.group(1))  # 日期部分(不含时间)
+                    break
+                m2 = self._MERCHANT_REPLY_DATE_ONLY_PAT.search(t)
+                if m2:
+                    dates.append(m2.group(1))  # 无时间日期(较老回复)
                     break
                 if t == "回复":
                     break  # 本段未找到日期则结束,避免越界到其他用户评论

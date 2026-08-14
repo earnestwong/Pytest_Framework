@@ -44,6 +44,7 @@ class ReviewParser:
         "有帮助", "评论", "说点什么吧～", "头像", "有帮助按钮", "评论按钮",
         "收起", "展开", "全文",  # 折叠/展开按钮文本
         "打卡后评价", "通过大众点评消费",  # 评价标签
+        "外卖评价",  # 外卖渠道标签(易被误认作用户名,实际用户多为匿名用户)
         "已收藏", "打卡", "写评价",  # 底部操作栏
         "查看全部", "顶部查看全部",
         "搜索栏", "返回", "收藏", "分享", "更多",
@@ -55,7 +56,8 @@ class ReviewParser:
     UI_NOISE_PAT = re.compile(
         r"^正文\d+$|^图片\d+$|^评论\d+$|^共\d+条回复$"
         r"|^\d+条评论$|^\d+小时前有新增评价$"
-        r"^(菜单|优惠|推荐菜|评价)\s*\(\d+\)$"  # 菜单(7)/评价(1359)
+        r"|^(菜单|优惠|推荐菜|评价)\s*\(\d+\)$"
+        r"|^吃过本店\d+次$"  # 消费次数标签(易被误认作用户名,真实用户名在其左侧)
     )
 
     def parse(self, text_items: List[Dict]) -> List[Dict]:
@@ -151,17 +153,27 @@ class ReviewParser:
             "user": "", "date": items[d_idx]["text"], "score": "",
             "content": "", "avg_price": "", "merchant_reply": "",
             "merchant_reply_bounds": "",
+            "content_bounds": "",  # 内容节点bounds(用于判断评论是否在屏幕底部)
         }
 
         # 1. 找用户名:
         #   真机顺序:日期 → 用户名(取 d_idx+1)
         #   MuMu 顺序:用户名 → [头像/签名] → 日期(日期前可能隔头像等噪声节点)
+        #   日期后可能紧跟评价标签(如"外卖评价"/"打卡后评价")而非用户名,需跳过
+        #   注意:用户名一定在评分之前,遇到评分/内容即停止向后扫描
         user_idx = -1
-        if d_idx + 1 < end_idx and self._is_username_candidate(items[d_idx + 1]["text"]):
-            # 真机:日期后一节点是用户名
-            user_idx = d_idx + 1
-            card["user"] = items[user_idx]["text"]
-        else:
+        # 真机:日期后扫描最多3个节点,只跳过评价标签/签名噪声,找第一个用户名候选
+        for look in range(1, min(4, end_idx - d_idx)):
+            cand_text = items[d_idx + look]["text"]
+            if self._is_username_candidate(cand_text):
+                user_idx = d_idx + look
+                card["user"] = cand_text
+                break
+            # 只跳过评价标签("外卖评价"等)和签名;评分/人均/内容都是用户名之后的东西,停止
+            if cand_text in self.UI_NOISE or self.USER_SIG_PAT.match(cand_text):
+                continue
+            break
+        if user_idx < 0:
             # MuMu:向前扫描(最多3个节点),跳过头像/签名等噪声,找用户名候选
             for back in range(1, min(4, d_idx + 1)):
                 prev_text = items[d_idx - back]["text"]
@@ -231,6 +243,7 @@ class ReviewParser:
                 card["content"] += "\n" + text
             else:
                 card["content"] = text
+            card["content_bounds"] = items[j]["bounds"]  # 记录内容节点底部bounds
 
         # MuMu 顺序:用户名在日期前,日期前可能还有签名节点,内容在日期后
         # 上面已处理日期后部分;若用户名在日期前且评分未找到,检查日期前是否有评分(罕见)
