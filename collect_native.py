@@ -117,28 +117,20 @@ def main():
     )
     print(f"CSV 文件: {csv_path}(增量写入)")
 
-    def get_reply_date_from_detail(candidates, target_user="", reply_text="", y_max=0):
+    def get_reply_date_from_detail(candidates, card=None):
         """
         点击候选元素进入详情页,提取商家回复日期(含下滑重试)
-        详情页回复日期可能在屏幕下方,首次提取为空时下滑一次重试
-        :param target_user: 目标评论者用户名(非空时校验详情页评论者,
-                            点错详情页则返回列表继续尝试下一个候选)
-        :param reply_text: 商家回复文本(点错详情页 back() 后重新 dump,
-                            用 find_reply_candidates 重新定位候选,原候选坐标已失效)
-        :param y_max: 重新定位时的 Y 坐标上限
-        :return (是否成功取得回复日期, 回复日期, 详情页评论者用户名)
+        规则:点开商家回复后,详情页顶部能抓到该评论的用户名(权威归属)。
+        :param card: 目标卡片(用于复合身份校验)。
+                     传入时,对每个进入详情页的候选做复合匹配,
+                     匹配失败则 back() 继续下一个候选(精确定位坐标可能指错回复,
+                     多条回复常以"亲爱的顾客"开头,需逐个尝试找到真正归属的那条);
+                     不传时,点开第一个进入详情页的候选即返回
+                     (向后兼容3b孤立回复补全场景,该场景在调用方对候选卡片列表做匹配)。
+        :return (是否进入详情页, 回复日期, 详情页评论者信息dict)
+                 dict = {'user': ..., 'date': ..., 'content_prefix': ...};未进入详情页返回 None
         """
-        tried_centers = set()  # 已点击失败的坐标,重新定位时排除
-        while candidates:
-            # 取第一个未尝试过的候选
-            btn = None
-            for c in candidates:
-                if c["center"] not in tried_centers:
-                    btn = c
-                    break
-            if btn is None:
-                break
-            tried_centers.add(btn["center"])
+        for btn in candidates:
             x, y = btn["center"]
             print(f"  [商家回复] 尝试点击 @ ({x}, {y}) text=[{btn['text'][:15]}]")
             adb.tap(x, y, human=False)
@@ -148,22 +140,21 @@ def main():
                 print(f"  [商家回复] 本次点击未进入详情页,尝试下一个候选")
                 adb.human_delay(0.5, 1.0)
                 continue
-            # 已进入详情页:记录评论者用户名(供调用方校验点进的是否目标评论)
-            detail_user = adb.extract_detail_user(detail_xml)
-            # 点错详情页(评论者不符):返回列表重新定位候选,避免直接放弃
-            if target_user and detail_user and not _user_match(detail_user, target_user):
-                print(f"  [商家回复] 详情页评论者[{detail_user}]与目标[{target_user}]不符,返回重新定位")
-                adb.back()
-                adb.human_delay(3.0, 4.0)
-                # 重新 dump + 重新定位候选:back() 后列表坐标可能已变,
-                # 旧候选(含同前缀的上一屏回复)已失效,重新搜索当前屏的回复节点
-                if reply_text:
-                    fresh_xml = adb.dump_ui()
-                    candidates = find_reply_candidates(fresh_xml, reply_text, y_max)
-                else:
-                    candidates = []
-                continue
-            # 提取回复日期;长详情页(多条用户评论)回复日期在下方,最多下滑3次重试
+            # 复合身份信息:用户名+发布日期+内容前缀(一次性提取,避免多次解析XML)
+            detail_info = adb.extract_detail_comment_info(detail_xml)
+            # 复合身份校验(传了card时):匹配失败直接back继续下一个候选,
+            # 不浪费下滑重试(用户名都不对,找日期无意义)
+            if card is not None:
+                ok, reason = _composite_match(detail_info, card)
+                if not ok:
+                    print(f"  [商家回复] 详情页与卡片身份不符: {reason},尝试下一个候选")
+                    adb.back()
+                    adb.human_delay(3.0, 4.0)
+                    check_xml = adb.dump_ui()
+                    list_ok, check_xml = ensure_on_review_list(check_xml)
+                    if not list_ok:
+                        print(f"  [商家回复] back()后评论列表状态丢失,恢复失败")
+                    continue
             reply_date = adb.extract_merchant_reply_date(detail_xml)
             w, h = adb.get_screen_size()
             for _ in range(3):
@@ -174,8 +165,14 @@ def main():
                 adb.human_delay(1.0, 1.5)
                 detail_xml = adb.dump_ui()
                 reply_date = adb.extract_merchant_reply_date(detail_xml)
-                if not detail_user:
-                    detail_user = adb.extract_detail_user(detail_xml)
+                # 下滑后用户名/内容前缀可能滚出屏幕,只在原值缺失时重新提取
+                if not detail_info.get("user") or not detail_info.get("content_prefix"):
+                    new_info = adb.extract_detail_comment_info(detail_xml)
+                    detail_info = {
+                        "user": detail_info.get("user") or new_info.get("user", ""),
+                        "date": detail_info.get("date") or new_info.get("date", ""),
+                        "content_prefix": detail_info.get("content_prefix") or new_info.get("content_prefix", ""),
+                    }
             adb.back()  # 返回列表页
             adb.human_delay(3.0, 4.0)  # 等待页面加载稳定,避免过渡动画误判
             # 验证是否已回到评论列表:用 ensure_on_review_list 完整校验
@@ -186,38 +183,52 @@ def main():
             list_ok, check_xml = ensure_on_review_list(check_xml)
             if not list_ok:
                 print(f"  [商家回复] back()后评论列表状态丢失,恢复失败")
-            return True, reply_date, detail_user
-        return False, "", ""
+            return True, reply_date, detail_info
+        return False, "", None
 
-    def find_reply_candidates(xml, reply_text, y_max):
+    def find_reply_candidates(xml, reply_text, y_max, near_y=None):
         """
-        在XML中找商家回复的可点击候选元素,按Y升序返回
+        在XML中找商家回复的可点击候选元素
         策略:优先用回复内容前缀精确匹配(避免多条回复误匹配),
              匹配不到时回退到"XX(商家)"标签节点
         顶部(y<16%)为导航/搜索区,点击无效,排除
+        :param near_y: 期望回复所在y坐标(目标卡片内容底部)。
+                       多条同前缀回复(如都以"亲爱的顾客"开头)时,
+                       优先选空间上紧邻该卡片内容下方的那条
+                       (规则:商家回复永远对应它上面紧挨的那条用户评论)
         """
         _, screen_h = adb.get_screen_size()
         y_min = int(screen_h * 0.16)
+
+        def _sort_key(b):
+            # 优先按与 near_y 的距离排序(空间紧邻卡片),无 near_y 时按 y 升序
+            if near_y is not None:
+                return (abs(b["center"][1] - near_y), b["center"][1])
+            return (b["center"][1],)
+
         prefix_m = re.match(r'^(?:商家回复|.+?[（(]商家[）)]|商家)\s*[:：]\s*', reply_text)
         # 1. 优先:用回复内容前15字符精确匹配(定位到具体哪条回复)
         if prefix_m:
             search_text = reply_text[prefix_m.end():prefix_m.end() + 15]
             candidates = [b for b in adb.find_elements_by_text(xml, search_text)
-                          if y_min < b["center"][1] < y_max]
+                          if y_min < b["center"][1] < y_max
+                          and "语音评价" not in b["text"]]
             if candidates:
-                candidates.sort(key=lambda b: b["center"][1])
+                candidates.sort(key=_sort_key)
                 return candidates
         # 2. 回退:搜索"XX(商家)"标签节点(列表页合并节点如"丰裕(商家): xxx")
         candidates = [b for b in adb.find_elements_by_text(xml, reply_text[:20])
-                      if y_min < b["center"][1] < y_max]
+                      if y_min < b["center"][1] < y_max
+                      and "语音评价" not in b["text"]]
         if candidates:
-            candidates.sort(key=lambda b: b["center"][1])
+            candidates.sort(key=_sort_key)
             return candidates
         # 3. 最终回退:搜索"商家"关键词
         candidates = [b for b in adb.find_elements_by_text(xml, "商家")
                       if ("（商家）" in b["text"] or "(商家)" in b["text"])
+                      and "语音评价" not in b["text"]
                       and y_min < b["center"][1] < y_max]
-        candidates.sort(key=lambda b: b["center"][1])
+        candidates.sort(key=_sort_key)
         return candidates
 
     def _reply_fingerprint(text: str) -> str:
@@ -234,12 +245,69 @@ def main():
             return False
         return a in b or b in a
 
-    def _user_match(a: str, b: str) -> bool:
-        """两个用户名是否同源(互相包含,兼容细节差异);任一为空则不做校验"""
-        a, b = (a or "").strip(), (b or "").strip()
-        if not a or not b:
-            return True
-        return a in b or b in a
+    def _composite_match(detail_info, card):
+        """
+        复合身份匹配:结合用户名、评论日期、评论内容前缀判断详情页与列表页卡片是否同人
+
+        场景:匿名用户用户名相同(如多个"匿名用户"),仅靠用户名无法区分归属,
+             需结合评论日期和内容前缀确认。
+
+        匹配规则(优先级从高到低):
+          1. 用户名明确不同(非匿名) → 直接拒绝
+          2. 内容前缀匹配 → 通过(内容是最稳定标识,即使匿名同名内容也大概率不同)
+          3. 日期匹配 → 通过(次要依据,容忍"发布于"前缀)
+          4. 匿名同名(都是"匿名用户")但内容/日期都不匹配 → 拒绝(不同评论的重名匿名用户)
+          5. 非匿名同名且无内容/日期信息 → 通过(列表页用户名已能区分)
+          6. 详情页信息缺失 → 通过(向后兼容,由调用方决定是否信任)
+
+        :param detail_info: 详情页提取的 {'user', 'date', 'content_prefix'}
+        :param card: 列表页卡片 {'user', 'date', 'content', ...}
+        :return (是否匹配, 不匹配原因)
+        """
+        if not detail_info:
+            return True, ""  # 详情页信息缺失,放行(向后兼容)
+
+        d_user = (detail_info.get("user") or "").strip()
+        d_date = (detail_info.get("date") or "").strip()
+        d_content = (detail_info.get("content_prefix") or "").strip()
+        c_user = (card.get("user") or "").strip()
+        c_date = (card.get("date") or "").strip()
+        c_content = (card.get("content") or "").strip()
+
+        def _is_anon(name):
+            """匿名用户:空串或含"匿名"字样(大众点评匿名用户名恒为"匿名用户")"""
+            return not name or "匿名" in name
+
+        # 1. 用户名明确不同(非匿名) → 直接拒绝
+        if (d_user and c_user
+                and not _is_anon(d_user) and not _is_anon(c_user)
+                and d_user != c_user
+                and d_user not in c_user and c_user not in d_user):
+            return False, f"用户名不同[{d_user}≠{c_user}]"
+
+        # 2. 内容前缀匹配 → 通过(去空白/占位符取前15字比较,容忍截断/省略号差异)
+        #    注意:"￼"(U+FFFC,图片/emoji占位符)在详情页提取时可能被去掉、
+        #    卡片解析时保留,导致[:15]截断后字符错位,必须先去除再比较
+        if d_content and c_content:
+            norm_d = re.sub(r"[\s￼]+", "", d_content)[:15]
+            norm_c = re.sub(r"[\s￼]+", "", c_content)[:15]
+            if norm_d and norm_c and (norm_d in norm_c or norm_c in norm_d):
+                return True, ""
+
+        # 3. 日期匹配 → 通过("发布于"前缀已在提取时去除,直接比较)
+        if d_date and c_date:
+            if d_date == c_date or d_date in c_date or c_date in d_date:
+                return True, ""
+
+        # 4. 匿名同名 → 拒绝(用户名恒为"匿名用户",无内容/日期佐证即无法区分归属)
+        #    注意:规则2/3已先试过内容、日期匹配,走到这里说明都不匹配或信息缺失。
+        #    详情页信息不完整(如只有匿名用户名)时也在此拒绝,宁缺毋滥——
+        #    否则会误接受其他评论详情页的回复日期(如把下一条评论的日期归属到本卡片)
+        if _is_anon(d_user) and _is_anon(c_user):
+            return False, f"匿名同名但内容/日期均不匹配(内容[{d_content[:10]}]vs[{c_content[:10]}],日期[{d_date}]vs[{c_date}])"
+
+        # 5. 非匿名同名无辅助信息 → 放行
+        return True, ""
 
     def ensure_on_review_list(xml_str, max_back=2):
         """
@@ -335,9 +403,10 @@ def main():
         last_first_y = None
         while expanded < max_expand:
             all_btns = adb.find_elements_by_text(xml_str, "全文")
-            # 排除"查看全文"(导航链接)和"收起全文"(收起按钮)
+            # 排除"查看全文"(导航链接)、"收起全文"(收起按钮)和"语音评价"(标签干扰)
             btns = [b for b in all_btns
-                    if "查看" not in b["text"] and "收起" not in b["text"]]
+                    if "查看" not in b["text"] and "收起" not in b["text"]
+                    and "语音评价" not in b["text"]]
             # 排除顶部15%安全区内的按钮(防止误触导航栏/Tab导致列表跳顶)
             btns = [b for b in btns if b["center"][1] > safe_y_min]
             if not btns:
@@ -481,7 +550,7 @@ def main():
                 if not candidates:
                     print(f"  [商家回复] 未在XML中找到孤立回复元素,跳过")
                     continue
-                entered, reply_date, detail_user = get_reply_date_from_detail(candidates)
+                entered, reply_date, detail_info = get_reply_date_from_detail(candidates)
                 if not entered:
                     print(f"  [商家回复] 孤立回复所有候选均未进入详情页,跳过")
                     continue
@@ -489,17 +558,19 @@ def main():
                     print(f"  [商家回复] 孤立回复已进入详情页,但未找到回复日期")
                     continue
                 # 补到上一屏最后一条还没有商家回复的卡片(孤立回复必定紧跟该卡片内容)
+                # 匿名用户同名场景:倒序遍历最近N条无回复卡片,用复合身份匹配定位正确归属
                 target = None
-                for c in reversed(summarizer.cards):
-                    if not (c.get("merchant_reply") or "").strip():
+                for c in reversed(summarizer.cards[-30:]):  # 最近30条内搜索,避免全量遍历
+                    if (c.get("merchant_reply") or "").strip():
+                        continue
+                    ok, reason = _composite_match(detail_info, c)
+                    if ok:
                         target = c
                         break
+                    # 调试日志:记录为何不匹配(便于排查匿名重名场景)
+                    print(f"  [商家回复] 候选卡片[{c.get('user')}]{c.get('date')}不匹配: {reason}")
                 if target is None:
-                    print(f"  [商家回复] 无上一屏卡片可补全,跳过")
-                    continue
-                # 详情页评论者校验:点进的详情页须与目标卡片同人,防止把别的回复误补过来
-                if detail_user and not _user_match(detail_user, target.get("user")):
-                    print(f"  [商家回复] 详情页评论者[{detail_user}]与目标[{target.get('user')}]不符,放弃补全")
+                    print(f"  [商家回复] 无上一屏卡片通过复合身份校验,跳过(可能已归属或匿名重名未匹配)")
                     continue
                 target["merchant_reply"] = reply_text
                 target["merchant_reply_date"] = reply_date
@@ -571,20 +642,28 @@ def main():
             if bottom_cards:
                 print(f"  [补救] {len(bottom_cards)} 条评论在屏幕底部但回复缺失,小幅下滑露出回复")
                 y1 = int(h * 0.75)
-                y2 = y1 - 200  # 小幅下滑 200px
+                # 下滑 200px 露出底部回复:足够把屏底评论的回复节点拉进屏幕,
+                # 又不会把顶部评论的回复挤出屏幕顶部/导航区(400px会导致顶部回复
+                # 滚入 y<16% 导航区,被 find_reply_candidates 过滤,3d 定位不到)
+                y2 = y1 - 200
                 adb.swipe(w // 2, y1, w // 2, y2, duration_ms=600, human=False)
                 adb.human_delay(1.0, 1.5)
                 retry_xml = adb.dump_ui()
                 new_items = adb.extract_all_text(retry_xml, min_len=1)
                 new_cards = parser.parse(new_items)
-                for old_card in bottom_cards:
+                for old_card in cards:
                     old_key = f"{old_card.get('date', '')}|{(old_card.get('content') or '')[:20]}"
                     for new_card in new_cards:
                         new_key = f"{new_card.get('date', '')}|{(new_card.get('content') or '')[:20]}"
-                        if new_key == old_key and (new_card.get("merchant_reply") or "").strip():
-                            old_card["merchant_reply"] = new_card["merchant_reply"]
-                            old_card["merchant_reply_bounds"] = new_card.get("merchant_reply_bounds", "")
-                            print(f"  [补救] 补全商家回复: [{old_card.get('user') or '?'}] {old_card.get('date')}")
+                        if new_key == old_key:
+                            # 下滑后坐标已变:同步所有卡片到新坐标。
+                            # 若不更新,3d 仍用下滑前的旧坐标点击,顶部评论的回复
+                            # 下滑后滚入导航区(y<16%)或屏幕外,旧坐标点击会点到错误位置。
+                            old_card["content_bounds"] = new_card.get("content_bounds") or old_card.get("content_bounds")
+                            if (new_card.get("merchant_reply") or "").strip():
+                                old_card["merchant_reply"] = new_card["merchant_reply"]
+                                old_card["merchant_reply_bounds"] = new_card.get("merchant_reply_bounds") or old_card.get("merchant_reply_bounds")
+                                print(f"  [补救] 补全商家回复: [{old_card.get('user') or '?'}] {old_card.get('date')}")
                             break
                 # 下滑后坐标已变,更新 xml_str 供后续 3d 定位使用
                 xml_str = retry_xml
@@ -618,28 +697,49 @@ def main():
                        for sc in summarizer.cards):
                     print(f"  [商家回复] 该卡片回复日期已获取,跳过")
                     continue
-                # 精确定位:优先用解析器记录的回复节点坐标
-                candidates = []
-                r_bounds = card.get("merchant_reply_bounds")
-                if r_bounds:
-                    bx1, by1, bx2, by2 = r_bounds
-                    cy = (by1 + by2) // 2
-                    if cy < y_max and cy > int(h * 0.16):
-                        candidates = [{"text": card["merchant_reply"],
-                                       "center": ((bx1 + bx2) // 2, cy)}]
-                if not candidates:
-                    candidates = find_reply_candidates(xml_str, card["merchant_reply"], y_max)
-                if not candidates:
-                    print(f"  [商家回复] 未在XML中找到可点击的回复元素,跳过")
-                    continue
-                entered, reply_date, detail_user = get_reply_date_from_detail(
-                    candidates, card.get("user"), card["merchant_reply"], y_max)
+                # 定位并点击:最多尝试3种屏幕状态(当前/反向/正向滚动)。
+                # 前一张卡片处理时可能滚动过(详情页back、重试滚动),列表位置已变,
+                # 旧坐标(merchant_reply_bounds)失效,因此每种状态都重新dump定位。
+                # 滚动方向场景:
+                #   反向(内容下移):回复被3c2补救下滑挤出屏幕顶部/导航区(y<16%,被过滤)时拉回
+                #   正向(内容上移):回复在屏幕底部下方(屏幕外)时露出
+                w2, h2 = adb.get_screen_size()
+                entered = False
+                reply_date = ""
+                detail_info = None
+                for attempt, scroll in enumerate([None, "backward", "forward"]):
+                    if attempt > 0:
+                        if scroll == "backward":
+                            adb.swipe(w2 // 2, int(h2 * 0.4), w2 // 2, int(h2 * 0.85), duration_ms=600, human=False)
+                        else:
+                            adb.swipe(w2 // 2, int(h2 * 0.75), w2 // 2, int(h2 * 0.45), duration_ms=600, human=False)
+                        adb.human_delay(1.0, 1.5)
+                    fresh_xml = adb.dump_ui()
+                    fresh_items = adb.extract_all_text(fresh_xml, min_len=1)
+                    fresh_cards = parser.parse(fresh_items)
+                    # 用当前屏幕刷新near_y(内容底部y):按 date+内容前20 匹配本卡片
+                    near_y = None
+                    card_key = f"{card.get('date', '')}|{(card.get('content') or '')[:20]}"
+                    for fc in fresh_cards:
+                        fc_key = f"{fc.get('date', '')}|{(fc.get('content') or '')[:20]}"
+                        if fc_key == card_key:
+                            if fc.get("content_bounds"):
+                                near_y = fc["content_bounds"][3]
+                            break
+                    candidates = find_reply_candidates(
+                        fresh_xml, card["merchant_reply"], y_max, near_y=near_y)
+                    state_name = "当前" if scroll is None else ("反向" if scroll == "backward" else "正向")
+                    if not candidates:
+                        print(f"  [商家回复] {state_name}屏幕未找到回复元素,尝试滚动")
+                        continue
+                    # 传card:函数内部对每个候选做复合匹配,失败则自动back继续下一个候选,
+                    # 直到找到身份匹配的回复详情页(解决多条回复同前缀时定位到错误回复的问题)
+                    entered, reply_date, detail_info = get_reply_date_from_detail(
+                        candidates, card=card)
+                    if entered:
+                        break
                 if not entered:
-                    print(f"  [商家回复] 所有候选均未进入详情页,跳过本条")
-                    continue
-                # 详情页评论者校验:点进的详情页须与卡片同人,防止取到别的回复的日期
-                if detail_user and not _user_match(detail_user, card.get("user")):
-                    print(f"  [商家回复] 详情页评论者[{detail_user}]与卡片[{card.get('user')}]不符,放弃日期")
+                    print(f"  [商家回复] 多状态滚动重试后仍无匹配,跳过本条")
                     continue
                 if not reply_date:
                     print(f"  [商家回复] 已进入详情页,但未找到回复日期")

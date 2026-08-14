@@ -33,8 +33,8 @@ class CSVExporter:
     NEUTRAL_KEYWORDS = ("还可以", "一般")
     NEGATIVE_KEYWORDS = ("较差", "很糟糕")
 
-    # 相对时间换算:刚刚/N小时前/N天前/昨天/前天
-    _REL_PAT = re.compile(r"^(\d+)\s*(小时|天)前$")
+    # 相对时间换算:刚刚/N分钟前/N小时前/N天前/昨天/前天
+    _REL_PAT = re.compile(r"^(\d+)\s*(分钟|小时|天)前$")
     _NOW_PAT = re.compile(r"^(刚刚|刚刚前)$")
 
     @classmethod
@@ -75,7 +75,12 @@ class CSVExporter:
         if m:
             n = int(m.group(1))
             unit = m.group(2)
-            delta = timedelta(hours=n) if unit == "小时" else timedelta(days=n)
+            if unit == "分钟":
+                delta = timedelta(minutes=n)
+            elif unit == "小时":
+                delta = timedelta(hours=n)
+            else:
+                delta = timedelta(days=n)
             return (datetime.now() - delta).strftime("%Y-%m-%d")
         if s == "昨天":
             return (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")

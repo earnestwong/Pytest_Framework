@@ -470,6 +470,10 @@ class ADBHelper:
     _MERCHANT_REPLY_DATE_ONLY_PAT = re.compile(
         r'^(\d{4}年\d{1,2}月\d{1,2}日|\d{1,2}月\d{1,2}日|\d{4}[-/.]\d{1,2}[-/.]\d{1,2})$'
     )
+    # 商家回复日期(24小时内相对时间):如"3分钟前"/"2小时前"/"刚刚",由调用方换算成今天日期
+    _MERCHANT_REPLY_REL_PAT = re.compile(
+        r'^(\d+\s*分钟前|\d+\s*小时前|刚刚|昨天|前天)$'
+    )
 
     def extract_merchant_reply_date(self, xml_str: str) -> str:
         """
@@ -498,12 +502,18 @@ class ADBHelper:
                 if m2:
                     dates.append(m2.group(1))  # 无时间日期(较老回复)
                     break
+                m3 = self._MERCHANT_REPLY_REL_PAT.search(t)
+                if m3:
+                    dates.append(m3.group(1))  # 相对时间(24小时内回复)
+                    break
                 if t == "回复":
                     break  # 本段未找到日期则结束,避免越界到其他用户评论
         if not dates:
             return ""
-        # 取最早:优先带年份完整日期,其次"X月X日"
+        # 取最早:优先带年份完整日期,其次"X月X日";相对时间(分钟/小时前)视为最新排最前
         def _key(d):
+            if re.search(r'(分钟前|小时前|刚刚|昨天|前天)', d):
+                return 99999999
             m = re.match(r"^(\d{4})年?(\d{1,2})月(\d{1,2})日$", d)
             if m:
                 return int(m.group(1)) * 10000 + int(m.group(2)) * 100 + int(m.group(3))
@@ -518,7 +528,8 @@ class ADBHelper:
         return dates[0]
 
     # 详情页顶部区域的噪声节点(非评论者用户名)
-    _DETAIL_TOP_NOISE = {"返回", "分享", "更多", "关注", "头像", "收藏"}
+    _DETAIL_TOP_NOISE = {"返回", "分享", "更多", "关注", "头像", "收藏", "语音评价",
+                         "说点什么吧~", "说点什么吧～", "发条友善评论吧～", "喜欢就评论一下吧～"}
 
     def extract_detail_user(self, xml_str: str) -> str:
         """
@@ -529,15 +540,119 @@ class ADBHelper:
         items = self.extract_all_text(xml_str, min_len=1)
         for it in items:
             bx = it["bounds"]
+            # 过滤零面积元素(bounds如[0,0][0,0]的y=0会排在用户名前,干扰提取)
+            if bx[2] <= bx[0] or bx[3] <= bx[1]:
+                continue
             if bx[1] >= 300:
                 break  # 已超出顶部区域(节点按y升序),未找到用户名
             text = it["text"]
             if text in self._DETAIL_TOP_NOISE:
                 continue
+            # 输入框占位符(如"说点什么吧~"/"发条友善评论吧～")非用户名
+            if "评论吧" in text or "说点什么" in text:
+                continue
             if len(text) > 20:  # 用户名不会太长(可能是正文等)
                 continue
             return text
         return ""
+
+    # 详情页评分档位(用于跳过评分节点,定位评论内容前缀)
+    _DETAIL_SCORE_TEXTS = {
+        "很差", "较差", "一般", "好评", "很好", "满意", "超赞",
+        "还不错", "还行", "不错", "非常满意", "超预期", "很棒", "还可以",
+    }
+
+    def extract_detail_comment_info(self, xml_str: str) -> Dict[str, str]:
+        """
+        从评论详情页提取评论者身份信息(用于与列表页卡片做复合身份匹配)
+
+        解决匿名用户用户名相同(如多个"匿名用户")时仅靠用户名无法区分归属的问题,
+        额外提取评论发布日期和内容前缀作为辅助识别字段。
+
+        详情页顶部结构(y升序):
+            返回/分享/更多 → 头像 → 用户名(评论者) → "发布于X" → [评分] →
+            [口味/环境/服务] → 评论内容 → 店铺星级卡片 → ... → 商家回复
+
+        :return {'user': 评论者用户名, 'date': 评论发布日期(已去"发布于"前缀),
+                 'content_prefix': 评论内容前N字(已去对象占位符)}
+        """
+        items = self.extract_all_text(xml_str, min_len=1)
+        user = ""
+        date = ""
+        content_prefix = ""
+
+        # 1. 提取用户名(复用 extract_detail_user 的过滤逻辑,保证行为一致)
+        user = self.extract_detail_user(xml_str)
+
+        # 2. 提取评论发布日期("发布于X天前" / "发布于X月X日")
+        publish_pat = re.compile(r"^发布于\s*(.+)$")
+        date_idx = -1
+        for i, it in enumerate(items):
+            m = publish_pat.match(it["text"])
+            if m:
+                date = m.group(1).strip()
+                date_idx = i
+                break
+
+        # 3. 提取评论内容前缀
+        #    找到用户名节点索引(同 extract_detail_user 逻辑),从其后的位置开始扫描
+        user_idx = -1
+        for i, it in enumerate(items):
+            bx = it["bounds"]
+            if bx[2] <= bx[0] or bx[3] <= bx[1]:
+                continue
+            if bx[1] >= 300:
+                break
+            text = it["text"]
+            if text in self._DETAIL_TOP_NOISE:
+                continue
+            if "评论吧" in text or "说点什么" in text:
+                continue
+            if len(text) > 20:
+                continue
+            user_idx = i
+            break
+
+        # 内容扫描起点:用户名和日期节点中较后者之后
+        start_idx = max(user_idx, date_idx) + 1
+        for i in range(start_idx, len(items)):
+            text = items[i]["text"]
+            # 跳过用户名/日期节点本身
+            if user and text == user:
+                continue
+            # 跳过评分档位
+            if text in self._DETAIL_SCORE_TEXTS:
+                continue
+            # 跳过口味/环境/服务子评分
+            if re.match(r"^(口味|环境|服务)\s*[:：]", text):
+                continue
+            # 跳过人均价格
+            if re.match(r"^[￥¥]\s*\d+", text):
+                continue
+            # 跳过店铺星级卡片("店名 · X.X 星")
+            if re.search(r"·\s*\d+\.?\d*\s*星", text):
+                continue
+            # 跳过UI噪声(顶部/底部导航/操作栏)
+            if text in self._DETAIL_TOP_NOISE:
+                continue
+            # 跳过帮助/回复/收藏等操作文本
+            if text in {"有帮助", "没帮助", "回复", "收藏", "评论",
+                        "说点什么吧~", "说点什么吧～", "发条友善评论吧～",
+                        "这条评价内容有帮助吗？"}:
+                continue
+            # 跳过纯数字/评论数标签
+            if text.isdigit() or re.match(r"^\d+\s*条评论$", text) or text == "条评论":
+                continue
+            # 遇到商家标签 → 已到商家回复区,停止搜索
+            if "（商家）" in text or "(商家)" in text:
+                break
+            # 找到第一个长文本节点作为内容前缀(>8字,过滤短标签)
+            if len(text) >= 8:
+                # 去除对象占位符 ￼(U+FFFC) 等不可见字符
+                content_prefix = re.sub(r"[\uFFFC\uFFFD]", "", text).strip()
+                break
+
+        return {"user": user, "date": date, "content_prefix": content_prefix}
 
     # ---------- 截图 ----------
 
