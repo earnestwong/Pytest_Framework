@@ -158,18 +158,14 @@ def main():
                     detail_user = adb.extract_detail_user(detail_xml)
             adb.back()  # 返回列表页
             adb.human_delay(3.0, 4.0)  # 等待页面加载稳定,避免过渡动画误判
-            # 验证是否已返回列表页:用严格判定(星级卡片+回复按钮/商家标签),
-            # 商店页虽有星级卡片但没有"回复"按钮/商家标签,不会误判,
-            # 只在确认仍在详情页时才再back()一次,且最多一次,防止过度back()跳出列表
+            # 验证是否已回到评论列表:用 ensure_on_review_list 完整校验
+            # 仅靠 strict 判定(星级卡片+回复按钮)无法区分"商店主页"和"评论列表",
+            # back() 过度时可能落到商店主页/全部评价列表,strict 返回 False 误放行,
+            # 导致列表筛选丢失后继续采集混入好评。
             check_xml = adb.dump_ui()
-            if adb.detect_review_detail_page_strict(check_xml):
-                # 二次确认:等待后再检测,排除过渡动画干扰
-                adb.human_delay(1.5, 2.0)
-                check_xml = adb.dump_ui()
-                if adb.detect_review_detail_page_strict(check_xml):
-                    print(f"  [商家回复] back()后仍在详情页,再次返回")
-                    adb.back()
-                    adb.human_delay(3.0, 4.0)
+            list_ok, check_xml = ensure_on_review_list(check_xml)
+            if not list_ok:
+                print(f"  [商家回复] back()后评论列表状态丢失,恢复失败")
             return True, reply_date, detail_user
         return False, "", ""
 
@@ -272,8 +268,9 @@ def main():
             break
 
         # 1b. 详情页检测:滑动后可能误进评论详情页(网络卡顿/列表项误触)
-        #     详情页特征:同时有评论评分 + 店铺星级卡片,复用本次 dump 不额外消耗
-        #     注意:back()后页面可能还在加载过渡动画,需二次确认避免误判跳出列表页
+        #     注意:不能用 strict 判定(星级+回复按钮/商家标签)——差评列表页本身
+        #     就含"丰裕(商家)"标签,strict 会把列表页误判为详情页,导致误 back() 退出列表。
+        #     用宽松判定(星级卡片等任一特征),back()后还需二次确认避免过渡动画误判
         if adb.detect_review_detail_page(xml_str):
             # 二次确认:等待页面加载稳定后再检测,排除过渡动画干扰
             adb.human_delay(1.5, 2.0)
@@ -350,8 +347,8 @@ def main():
             # 重新 dump:展开后坐标全变,必须刷新
             xml_str = adb.dump_ui()
             # 检测是否误进评论详情页(小屏设备双击/坐标偏差导致)
-            # 详情页特征:同时有评论卡片(评分) + 店铺卡片(星级)
-            # 注意:需二次确认避免误判(列表页加载过渡动画可能残留详情页特征)
+            # 注意:不能用 strict 判定(列表页含"丰裕(商家)"标签会误判详情页),
+            # 用宽松判定 + 二次确认
             if adb.detect_review_detail_page(xml_str):
                 adb.human_delay(1.5, 2.0)
                 xml_str = adb.dump_ui()
@@ -383,30 +380,46 @@ def main():
         if stray_scores:
             stray_users = "、".join(f"{c['user'] or '?'}({c['score']})" for c in stray_scores[:3])
             print(f"  [守卫] 检测到非差评评分[{stray_users}],疑似已跳出差评列表")
-            # 尝试点击顶部筛选栏"差评"Tab 恢复(筛选栏在顶部 y<320 区域)
+            # 恢复策略(不盲目 back(),逐级判断页面层级):
+            #   1. 仍在评论列表(有筛选栏):点击"差评"Tab 恢复筛选
+            #   2. 在详情页/商店主页:用 ensure_on_review_list back() 回列表后再试
+            #   3. 页面已无评论特征(如搜索页/首页):不可恢复,直接终止
             restored = False
             for attempt in range(2):
+                # 先尝试点击顶部筛选栏"差评"Tab 恢复(筛选栏在顶部 y<320 区域)
                 tab_items = [it for it in adb.extract_all_text(xml_str, min_len=1)
                              if it["text"] == "差评" and it["bounds"][1] < 320]
-                if not tab_items:
-                    print(f"  [守卫] 未找到'差评'Tab,尝试返回键恢复")
-                    adb.back()
+                if tab_items:
+                    bx = tab_items[0]["bounds"]
+                    cx, cy = (bx[0] + bx[2]) // 2, (bx[1] + bx[3]) // 2
+                    print(f"  [守卫] 点击'差评'Tab @ ({cx}, {cy}),第{attempt+1}次尝试")
+                    adb.tap(cx, cy, human=False)
                     adb.human_delay(3.0, 4.0)
                     xml_str = adb.dump_ui()
+                    new_cards = parser.parse(adb.extract_all_text(xml_str, min_len=1))
+                    new_stray = [c for c in new_cards if c.get("score") in POSITIVE_SCORES]
+                    if not new_stray:
+                        restored = True
+                        cards = new_cards
+                        print(f"  [守卫] 差评筛选已恢复,继续采集")
+                        break
+                    print(f"  [守卫] 点击'差评'Tab后仍有非差评评分,继续下一级恢复")
                     continue
-                bx = tab_items[0]["bounds"]
-                cx, cy = (bx[0] + bx[2]) // 2, (bx[1] + bx[3]) // 2
-                print(f"  [守卫] 点击'差评'Tab @ ({cx}, {cy}),第{attempt+1}次尝试")
-                adb.tap(cx, cy, human=False)
-                adb.human_delay(3.0, 4.0)
-                xml_str = adb.dump_ui()
+                # 无筛选栏:可能是详情页/商店主页(back()可回到列表)或搜索页(不可恢复)
+                print(f"  [守卫] 页面无'差评'Tab,调用列表状态恢复(只处理详情页/商店主页)")
+                list_ok, xml_str = ensure_on_review_list(xml_str)
+                if not list_ok:
+                    print(f"  [守卫] 页面已无评论列表特征,不可恢复")
+                    break
+                # 恢复后重新解析评分检查
                 new_cards = parser.parse(adb.extract_all_text(xml_str, min_len=1))
                 new_stray = [c for c in new_cards if c.get("score") in POSITIVE_SCORES]
                 if not new_stray:
                     restored = True
                     cards = new_cards
-                    print(f"  [守卫] 差评筛选已恢复,继续采集")
+                    print(f"  [守卫] 已回到差评列表,继续采集")
                     break
+                print(f"  [守卫] 恢复后仍有非差评评分,继续尝试")
             if not restored:
                 print(f"  [守卫] 无法恢复差评筛选,终止采集(防止混入好评)")
                 break
