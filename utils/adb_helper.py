@@ -539,23 +539,32 @@ class ADBHelper:
 
     def extract_detail_merchant_reply(self, xml_str: str) -> str:
         """
-        从评论详情页提取第一条(最新)商家回复的完整内容
-        用于与列表页卡片 merchant_reply 做精确匹配(回复全文是最强归属标识)
-        详情页结构:... → XX（商家）→ 回复内容1 → 回复日期 → [下一条回复...] → 回复按钮
-        :return 去前缀标签/去空白占位符的回复全文;未找到返回空串
+        从评论详情页提取商家回复的完整内容(可能有多条回复)
+        用于与列表页卡片 merchant_reply 做精确匹配(回复全文是最强归属标识)。
+        注意:同一条评论可能有多次商家回复(商家补回复/追评回复),
+        列表页卡片显示其中一条,详情页会列出全部,必须全部收集,
+        否则 _composite_match 只拿第一条会因"回复全文不匹配"误拒绝。
+        详情页结构:... → XX（商家）→ 回复内容1 → 回复日期 → 回复按钮
+                          → XX（商家）→ 回复内容2 → 回复日期 → ...
+        :return 去前缀标签/去空白占位符的全部回复段落,以"||"分隔;未找到返回空串
         """
         items = self.extract_all_text(xml_str, min_len=1)
         # 商家标签可能带店铺名前缀,如"丰裕（商家）: 尊敬的顾客..."
         strip_pat = re.compile(r'^(?:[^:：]{0,10}[（(]商家[）)])\s*[:：]?\s*')
-        for i, it in enumerate(items):
-            text = it["text"]
+        results = []
+        i = 0
+        n = len(items)
+        while i < n:
+            text = items[i]["text"]
             if "（商家）" not in text and "(商家)" not in text:
+                i += 1
                 continue
             parts = []
             rest = strip_pat.sub("", text)  # 标签节点若已合并回复内容
             if rest:
                 parts.append(rest)
-            for j in range(i + 1, len(items)):
+            j = i + 1
+            while j < n:
                 t = items[j]["text"]
                 if "（商家）" in t or "(商家)" in t:
                     break  # 下一条商家回复,本段结束
@@ -566,16 +575,21 @@ class ADBHelper:
                         or self._MERCHANT_REPLY_REL_PAT.search(t)):
                     break  # 到达回复日期节点,本段结束
                 if not t.strip():
+                    j += 1
                     continue
                 # 过滤详情页噪声节点(头像/用户昵称等非回复内容)
                 if t in ("头像",) or "用户昵称" in t:
+                    j += 1
                     continue
                 parts.append(t)
+                j += 1
             content = "".join(parts)
             content = re.sub(r"[\s\uFFFC\uFFFD]+", "", content)
             if len(content) >= 10:
-                return content
-        return ""
+                results.append(content)
+            # 跳到本段结束处继续扫描(日期节点后可能还有下一条商家回复)
+            i = j if j > i else i + 1
+        return "||".join(results)
 
     # 详情页顶部区域的噪声节点(非评论者用户名)
     _DETAIL_TOP_NOISE = {"返回", "分享", "更多", "关注", "头像", "收藏", "语音评价",

@@ -137,6 +137,31 @@ def main():
         """
         for btn in candidates:
             x, y = btn["center"]
+            # 候选落在屏幕顶部/底部导航区时点击无效(点评底部Tab/顶部状态栏拦截):
+            # 该回复可能只露出屏幕边缘一条,中心点在导航栏上,直接 tap 会被拦截。
+            # 先小幅滚动把回复露到可点击区,再重新定位点击。
+            # 注意:精确匹配 y 范围放宽到 3%~98% 是为了跨屏残留回复能命中,
+            # 但导航区候选必须滚动露出后才能点击,否则白白浪费一次候选尝试。
+            w0, h0 = adb.get_screen_size()
+            if y > int(h0 * 0.90) or y < int(h0 * 0.10):
+                print(f"  [商家回复] 候选@({x},{y})位于导航区,小幅滚动露出后重新定位")
+                if y > int(h0 * 0.90):
+                    # 底部:下滑(内容上移)露出底部回复
+                    adb.swipe(w0 // 2, int(h0 * 0.80), w0 // 2, int(h0 * 0.55), duration_ms=600, human=False)
+                else:
+                    # 顶部:上滑(内容下移)露出顶部回复
+                    adb.swipe(w0 // 2, int(h0 * 0.45), w0 // 2, int(h0 * 0.70), duration_ms=600, human=False)
+                adb.human_delay(1.0, 1.5)
+                detail_xml = adb.dump_ui()
+                # 用候选文本前40字重新定位(与find_reply_candidates精确匹配一致,
+                # 避免同屏多条相似前缀回复时误选其他评论的回复)
+                reloc = [b for b in adb.find_elements_by_text(detail_xml, btn["text"][:40])
+                         if int(h0 * 0.10) < b["center"][1] < int(h0 * 0.90)]
+                if not reloc:
+                    print(f"  [商家回复] 滚动后未找到该候选,尝试下一个候选")
+                    continue
+                x, y = reloc[0]["center"]
+                print(f"  [商家回复] 滚动后重新定位 @ ({x}, {y}) text=[{btn['text'][:15]}]")
             print(f"  [商家回复] 尝试点击 @ ({x}, {y}) text=[{btn['text'][:15]}]")
             adb.tap(x, y, human=False)
             adb.human_delay(1.5, 2.5)
