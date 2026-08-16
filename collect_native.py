@@ -154,9 +154,13 @@ def main():
             # 身份信息缺失(user/date 为空,通常因详情页已滚至回复区)时,
             # 向上滚动(内容下移)露出评论者头部再提取。
             # 注意:上滚后回复区可能滚出屏幕,但回复字段已在上方提取,不受影响
-            if not (detail_info.get("user") or "").strip() \
-                    or not (detail_info.get("date") or "").strip():
-                print(f"  [商家回复] 详情页身份信息缺失(可能已滚至回复区),向上滚动露出评论者信息")
+            # 长评论详情页(内容+回复接近整屏)进入时自动滚到回复区底部,
+            # 一次上滚只露出发布时间,用户名仍在屏外,需循环上滚直到露出用户名。
+            for _scroll in range(3):
+                if (detail_info.get("user") or "").strip() \
+                        and (detail_info.get("date") or "").strip():
+                    break
+                print(f"  [商家回复] 详情页身份信息缺失(可能已滚至回复区),向上滚动露出评论者信息({_scroll + 1}/3)")
                 # 上滚(内容下移)露出评论者头部:小步慢速,避免惯性滚动把头部又甩出屏幕
                 adb.swipe(w // 2, int(h * 0.40), w // 2, int(h * 0.80), duration_ms=900, human=False)
                 adb.human_delay(1.0, 1.5)

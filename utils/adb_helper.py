@@ -604,6 +604,12 @@ class ADBHelper:
             # 图片/视频节点(如"图片01"/"播放")非用户名,大图浏览页常以它们开头
             if re.match(r"^图片\d*$", text) or "播放" in text:
                 continue
+            # 发布时间节点("发布于X月X日"/"发布于X天前")非用户名。
+            # 长评论详情页进入时自动滚到回复区,上滚一次后可能只露出
+            # 发布时间而用户名仍在屏外,若不排除会被误当作用户名,
+            # 导致复合身份校验误判"用户名不同"而放弃(实际是没滚到位)
+            if text.startswith("发布于"):
+                continue
             if len(text) > 20:  # 用户名不会太长(可能是正文等)
                 continue
             return text
