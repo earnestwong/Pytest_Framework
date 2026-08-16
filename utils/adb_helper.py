@@ -15,14 +15,24 @@ from typing import Optional, List, Dict, Tuple
 class ADBHelper:
     """ADB 命令封装,所有 shell 调用统一走此类"""
 
-    def __init__(self, device_serial: Optional[str] = None, adb_path: str = "adb"):
+    def __init__(
+        self,
+        device_serial: Optional[str] = None,
+        adb_path: str = "adb",
+        server_port: Optional[str] = None,
+    ):
         """
         :param device_serial: 设备序列号,MuMu 默认 127.0.0.1:7555,留空则取首个设备
         :param adb_path: adb 可执行文件路径,已加入 PATH 时用默认值即可
+        :param server_port: adb server 监听端口(默认 5037)。本机 5037 可能被其他
+                            工具(如 MuMu 自带 adb)抢占导致 daemon 反复被杀,
+                            可指定独立端口如 "5045" 规避
         """
         self.device_serial = device_serial
         self.adb_path = adb_path
         self._base_cmd = [adb_path]
+        if server_port:
+            os.environ["ANDROID_ADB_SERVER_PORT"] = server_port
         if device_serial:
             self._base_cmd += ["-s", device_serial]
 
@@ -198,7 +208,7 @@ class ADBHelper:
                 self._base_cmd + ["shell", f"rm -f {remote}"],
                 capture_output=True,
                 text=True,
-                timeout=5,
+                timeout=15,
                 encoding="utf-8",
                 errors="ignore",
             )
@@ -207,17 +217,17 @@ class ADBHelper:
                 self._base_cmd + ["shell", f"uiautomator dump {remote}"],
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=60,
                 encoding="utf-8",
                 errors="ignore",
             )
-            time.sleep(0.5)
+            time.sleep(1.0)
             # 读取文件内容(文件不存在则 cat 返回空,触发重试)
             cat = subprocess.run(
                 self._base_cmd + ["shell", f"cat {remote}"],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=30,
                 encoding="utf-8",
                 errors="ignore",
             )
@@ -617,11 +627,13 @@ class ADBHelper:
             [口味/环境/服务] → 评论内容 → 店铺星级卡片 → ... → 商家回复
 
         :return {'user': 评论者用户名, 'date': 评论发布日期(已去"发布于"前缀),
+                 'score': 评分档位(很差/较差/一般/好评等,详情页顶部评分节点),
                  'content_prefix': 评论内容前N字(已去对象占位符)}
         """
         items = self.extract_all_text(xml_str, min_len=1)
         user = ""
         date = ""
+        score = ""
         content_prefix = ""
 
         # 1. 提取用户名(复用 extract_detail_user 的过滤逻辑,保证行为一致)
@@ -663,8 +675,10 @@ class ADBHelper:
             # 跳过用户名/日期节点本身
             if user and text == user:
                 continue
-            # 跳过评分档位
+            # 跳过评分档位,同时记录评分(详情页顶部评论者评分节点,用于跨屏拼回卡片)
             if text in self._DETAIL_SCORE_TEXTS:
+                if not score:
+                    score = text
                 continue
             # 跳过口味/环境/服务子评分
             if re.match(r"^(口味|环境|服务)\s*[:：]", text):
@@ -695,7 +709,8 @@ class ADBHelper:
                 content_prefix = re.sub(r"[\uFFFC\uFFFD]", "", text).strip()
                 break
 
-        return {"user": user, "date": date, "content_prefix": content_prefix}
+        return {"user": user, "date": date, "score": score,
+                "content_prefix": content_prefix}
 
     # ---------- 截图 ----------
 

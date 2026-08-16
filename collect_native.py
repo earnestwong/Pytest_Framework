@@ -38,6 +38,7 @@ def load_config() -> dict:
     """加载 dianping_config.json,文件不存在则用内置默认值"""
     defaults = {
         "adb_path": "adb",
+        "adb_server_port": "",
         "device": "",
         "swipe_mode": "auto",
         "scroll": 0,
@@ -66,6 +67,8 @@ def parse_args():
     p.add_argument("--device", default=cfg["device"],
                    help="ADB 设备地址(留空=自动选首个 USB 真机;MuMu 填 127.0.0.1:16384)")
     p.add_argument("--adb-path", default=cfg["adb_path"], help="adb.exe 路径")
+    p.add_argument("--adb-port", dest="adb_port", default=cfg["adb_server_port"],
+                   help="adb server 端口(留空=默认 5037;被占用时可指定如 5045)")
     p.add_argument("--ratio", type=float, default=cfg["ratio"],
                    help=f"滑动距离比例,默认 {cfg['ratio']}")
     p.add_argument("--swipe-mode", default=cfg["swipe_mode"],
@@ -84,11 +87,13 @@ def main():
     # 初始化(原生通道无需 OCR)
     # 设备地址留空=USB 真机(直连,无需 adb connect);填 IP:Port=模拟器(需 adb connect)
     if args.device and ":" in args.device:
-        adb = ADBHelper(device_serial=args.device, adb_path=args.adb_path)
+        adb = ADBHelper(device_serial=args.device, adb_path=args.adb_path,
+                        server_port=args.adb_port or None)
         adb.connect(args.device)
     else:
         # USB 真机:不传 device_serial,自动选首个设备
-        adb = ADBHelper(device_serial=args.device or None, adb_path=args.adb_path)
+        adb = ADBHelper(device_serial=args.device or None, adb_path=args.adb_path,
+                        server_port=args.adb_port or None)
     parser = ReviewParser()
     summarizer = ReviewSummarizer()
 
@@ -140,9 +145,32 @@ def main():
                 print(f"  [商家回复] 本次点击未进入详情页,尝试下一个候选")
                 adb.human_delay(0.5, 1.0)
                 continue
-            # 复合身份信息:用户名+发布日期+内容前缀+商家回复全文(一次性提取,避免多次解析XML)
+            w, h = adb.get_screen_size()
+            # 详情页进入时可能自动滚动到最下方商家回复处(评论者头部在屏外)。
+            # 先提取回复相关字段(此刻回复区可见,不依赖滚动位置),再处理身份信息。
+            reply_date = adb.extract_merchant_reply_date(detail_xml)
             detail_info = adb.extract_detail_comment_info(detail_xml)
             detail_info["merchant_reply"] = adb.extract_detail_merchant_reply(detail_xml)
+            # 身份信息缺失(user/date 为空,通常因详情页已滚至回复区)时,
+            # 向上滚动(内容下移)露出评论者头部再提取。
+            # 注意:上滚后回复区可能滚出屏幕,但回复字段已在上方提取,不受影响
+            if not (detail_info.get("user") or "").strip() \
+                    or not (detail_info.get("date") or "").strip():
+                print(f"  [商家回复] 详情页身份信息缺失(可能已滚至回复区),向上滚动露出评论者信息")
+                # 上滚(内容下移)露出评论者头部:小步慢速,避免惯性滚动把头部又甩出屏幕
+                adb.swipe(w // 2, int(h * 0.40), w // 2, int(h * 0.80), duration_ms=900, human=False)
+                adb.human_delay(1.0, 1.5)
+                detail_xml = adb.dump_ui()
+                new_info = adb.extract_detail_comment_info(detail_xml)
+                detail_info = {
+                    "user": new_info.get("user", "") or detail_info.get("user", ""),
+                    "date": new_info.get("date", "") or detail_info.get("date", ""),
+                    "score": new_info.get("score", "") or detail_info.get("score", ""),
+                    "content_prefix": new_info.get("content_prefix", "")
+                    or detail_info.get("content_prefix", ""),
+                    "merchant_reply": detail_info.get("merchant_reply")
+                    or adb.extract_detail_merchant_reply(detail_xml),
+                }
             # 复合身份校验(传了card时):匹配失败直接back继续下一个候选,
             # 不浪费下滑重试(用户名都不对,找日期无意义)
             if card is not None:
@@ -156,7 +184,8 @@ def main():
                     if not list_ok:
                         print(f"  [商家回复] back()后评论列表状态丢失,恢复失败")
                     continue
-            reply_date = adb.extract_merchant_reply_date(detail_xml)
+            if not reply_date:
+                reply_date = adb.extract_merchant_reply_date(detail_xml)
             w, h = adb.get_screen_size()
             # 0. 商家回复区加载失败(详情页显示"点击重试"占位)时,先点击重试重新加载
             #    否则日期/回复段都为空,会误判为"点错"而丢失本可拿到的日期
@@ -201,6 +230,7 @@ def main():
                     detail_info = {
                         "user": detail_info.get("user") or new_info.get("user", ""),
                         "date": detail_info.get("date") or new_info.get("date", ""),
+                        "score": detail_info.get("score") or new_info.get("score", ""),
                         "content_prefix": detail_info.get("content_prefix") or new_info.get("content_prefix", ""),
                         "merchant_reply": detail_info.get("merchant_reply")
                         or adb.extract_detail_merchant_reply(detail_xml),
@@ -242,10 +272,18 @@ def main():
         # 1. 优先:用回复内容前40字精确匹配(定位到具体哪条回复)
         #    多个回复常以"亲爱的顾客/尊敬的顾客"开头,15字不足以区分,
         #    40字后不同回复内容差异明显,能精确定位到正确回复节点
+        #    注意:长评论(内容+图片+回复接近一屏)跨屏时,回复可能残留在屏幕
+        #    顶部(y<16%)或底部(y>90%),此时严格 y_min/y_max 过滤会把该回复排除,
+        #    导致精确匹配0候选,回退模糊匹配时误点到同屏其他评论的回复。
+        #    精确匹配用的搜索词是回复全文前40字(如"我们非常重视您的意见"),
+        #    导航/搜索/底部操作栏都不会出现该文本,故 y 范围放宽到 3%~98%
+        #    (仅排除状态栏与底部导航),允许跨屏残留的回复命中。
         if prefix_m:
             search_text = reply_text[prefix_m.end():prefix_m.end() + 40]
+            y_lo = int(screen_h * 0.03)
+            y_hi = int(screen_h * 0.98)
             candidates = [b for b in adb.find_elements_by_text(xml, search_text)
-                          if y_min < b["center"][1] < y_max
+                          if y_lo < b["center"][1] < y_hi
                           and "语音评价" not in b["text"]
                           and "图片" not in b["text"] and "播放" not in b["text"]]
             if candidates:
@@ -359,6 +397,10 @@ def main():
                         or (d_user and c_user and d_user == c_user)):  # 同名(含非匿名)
                     return True, ""
                 return False, f"用户名不一致[{d_user}≠{c_user}]但日期相同,拒绝(防误配)"
+            # 日期明确不同 → 拒绝。日期是评论的强标识(同屏相邻评论日期也可能不同),
+            # 详情页日期与卡片日期不同即非同一条评论,直接拒绝防止跨屏误归属
+            # (如把上一条评论的孤立回复错补到下一张卡片上)
+            return False, f"日期不同[{d_date}≠{c_date}],拒绝(防误配)"
 
         # 5. 匿名同名 → 拒绝(用户名恒为"匿名用户",无内容/日期/回复佐证即无法区分归属)
         #    详情页信息不完整(如只有匿名用户名)时也在此拒绝,宁缺毋滥——
@@ -630,7 +672,34 @@ def main():
                     # 调试日志:记录为何不匹配(便于排查匿名重名场景)
                     print(f"  [商家回复] 候选卡片[{c.get('user')}]{c.get('date')}不匹配: {reason}")
                 if target is None:
-                    print(f"  [商家回复] 无上一屏卡片通过复合身份校验,跳过(可能已归属或匿名重名未匹配)")
+                    # 跨屏长评论场景:该评论内容+图片+回复接近一屏,两屏都无法形成
+                    # 完整卡片(上一屏只有用户名露底,下一屏只有内容露顶)。
+                    # 用详情页提取的权威身份信息(用户名+评论日期)+ 屏顶露出的
+                    # 孤立内容 + 本条回复,拼成一张完整卡片补回,避免整条丢失。
+                    d_user = (detail_info or {}).get("user", "").strip()
+                    d_date = (detail_info or {}).get("date", "").strip()
+                    lead_text = "".join(getattr(parser, "leading_content", []) or []).strip()
+                    if d_user and d_date and (lead_text or (detail_info or {}).get("content_prefix", "")):
+                        # 先去重:该用户该日期的卡片已存在(可能是跨屏多次拼回/已正常解析)则跳过
+                        if any((c.get("user") or "").strip() == d_user
+                               and (c.get("date") or "").strip() == d_date
+                               for c in summarizer.cards):
+                            print(f"  [商家回复] 跨屏评论[{d_user}]{d_date}已存在,跳过拼回")
+                        else:
+                            new_card = {
+                                "user": d_user,
+                                "date": d_date,
+                                "score": (detail_info or {}).get("score", ""),
+                                "content": lead_text or (detail_info or {}).get("content_prefix", ""),
+                                "avg_price": "",
+                                "merchant_reply": reply_text,
+                                "merchant_reply_date": reply_date,
+                            }
+                            summarizer.cards.append(new_card)
+                            print(f"  [商家回复] 跨屏长评论卡片缺失,已用详情页信息拼回: {d_date} -> [{d_user}]")
+                            csv_exporter.rewrite_all(summarizer.cards)
+                    else:
+                        print(f"  [商家回复] 无上一屏卡片通过复合身份校验,跳过(可能已归属或匿名重名未匹配)")
                     continue
                 target["merchant_reply"] = reply_text
                 target["merchant_reply_date"] = reply_date
@@ -769,10 +838,13 @@ def main():
                 detail_info = None
                 for attempt, scroll in enumerate([None, "backward", "forward"]):
                     if attempt > 0:
+                        # 状态滚动:小步慢速(距离≤35%屏、时长≥900ms),避免快速滑动
+                        # 触发惯性滚动(惯性可能一次滚近一整屏,把目标卡片甩出屏幕)。
+                        # backward=内容下移(往回滚),forward=内容上移(向前滚)
                         if scroll == "backward":
-                            adb.swipe(w2 // 2, int(h2 * 0.4), w2 // 2, int(h2 * 0.85), duration_ms=600, human=False)
+                            adb.swipe(w2 // 2, int(h2 * 0.45), w2 // 2, int(h2 * 0.80), duration_ms=900, human=False)
                         else:
-                            adb.swipe(w2 // 2, int(h2 * 0.75), w2 // 2, int(h2 * 0.45), duration_ms=600, human=False)
+                            adb.swipe(w2 // 2, int(h2 * 0.70), w2 // 2, int(h2 * 0.40), duration_ms=900, human=False)
                         adb.human_delay(1.0, 1.5)
                     fresh_xml = adb.dump_ui()
                     fresh_items = adb.extract_all_text(fresh_xml, min_len=1)

@@ -14,3 +14,4 @@ python-dotenv==1.0.0
 pillow>=10.0.0              # 截图裁剪
 paddleocr>=2.7.0            # OCR 识别 H5 差评文本
 paddlepaddle>=2.5.0         # PaddleOCR 后端,无 GPU 用 CPU 版
+requests==2.31.0

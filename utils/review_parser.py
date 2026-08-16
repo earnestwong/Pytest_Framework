@@ -85,18 +85,31 @@ class ReviewParser:
         # 第2步:找所有日期节点索引(卡片锚点)
         date_idxs = [i for i, it in enumerate(valid) if self.DATE_PAT.match(it["text"])]
 
-        # 第2b步:检测第一个日期锚点之前的孤立商家回复
+        # 第2b步:检测第一个日期锚点之前的孤立商家回复 + 孤立评论内容
         #   场景:上一条评论很长,全文展开后上划,日期/用户名移出屏幕,
         #   屏幕上只剩内容残余+图片+商家回复,然后是下一条评论。
-        #   这条商家回复属于上一屏最后一条评论,记录到 leading_replies 供调用方处理
+        #   - 商家回复:记录到 leading_replies 供调用方处理(已有)
+        #   - 评论内容:记录到 leading_content 供调用方补回该评论
+        #     (跨屏长评论:内容+图片+回复接近一屏,整条评论在上一屏只有用户名露底、
+        #      下一屏只有内容露顶,两屏都无法形成完整卡片,需用详情页身份信息拼回)
         self.leading_replies = []
         self.leading_reply_items = []  # 与 leading_replies 一一对应,含屏幕坐标(bounds)
+        self.leading_content = []
+        self.leading_content_items = []  # 与 leading_content 一一对应,含屏幕坐标(bounds)
         if date_idxs:
             first_d = date_idxs[0]
             for i in range(first_d):
                 if self.MERCHANT_PAT.match(valid[i]["text"]):
                     self.leading_replies.append(valid[i]["text"])
                     self.leading_reply_items.append(valid[i])
+                elif (len(valid[i]["text"]) >= 8
+                        and not self._is_username_candidate(valid[i]["text"])
+                        and not self.USER_SIG_PAT.match(valid[i]["text"])
+                        and not self.UI_NOISE_PAT.match(valid[i]["text"])
+                        and not self.SEARCH_LINK_PAT.match(valid[i]["text"])):
+                    # 孤立评论内容(较长文本,非用户名/签名/搜索链接/商家回复)
+                    self.leading_content.append(valid[i]["text"])
+                    self.leading_content_items.append(valid[i])
 
         # 第3步:按日期锚点切分并解析每张卡片
         # 注意:MuMu 顺序下「用户名→日期」,下一张的用户名会落在当前卡片范围内,
@@ -224,15 +237,18 @@ class ReviewParser:
             # 则当前节点是下一张卡片的用户名,本卡片停止合并
             if self._is_username_candidate(text):
                 # 向后看最多3个节点,只要遇到日期就认定是下一卡片锚点
+                # 关键:用户名后紧跟签名"发布过X条..."也是卡片头部特征——
+                # 长评论(内容+图片+回复接近一屏)跨屏时,用户名露在屏幕底部,
+                # 日期/评分/内容在屏外看不到,仅凭"用户名+签名"组合即可判定
+                # 这是新卡片边界,否则用户名会被吞进上一条评论内容(丢用户)
                 hit_date = False
                 for k in range(1, min(4, len(items) - j)):
                     nxt = items[j + k]["text"]
-                    if self.DATE_PAT.match(nxt):
+                    if self.DATE_PAT.match(nxt) or self.USER_SIG_PAT.match(nxt):
                         hit_date = True
                         break
                     # 遇到非签名/非图片标签的其他用户名候选,放弃(可能是内容里的专有名词)
-                    if (not self.USER_SIG_PAT.match(nxt)
-                            and not self.UI_NOISE_PAT.match(nxt)
+                    if (not self.UI_NOISE_PAT.match(nxt)
                             and not self.PRICE_PAT.match(nxt)
                             and nxt not in self.SCORE_TEXTS
                             and not self.MERCHANT_PAT.match(nxt)):
