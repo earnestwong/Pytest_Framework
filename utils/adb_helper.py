@@ -413,6 +413,19 @@ class ADBHelper:
     # 店铺星级卡片特征:"· 3.8 星" / "3.8 星" / "3.8星"(详情页底部店铺卡片独有)
     _SHOP_STAR_PAT = re.compile(r'·?\s*\d+(?:\.\d+)?\s*星')
 
+    # 详情页回复日期节点的完整形态(独立节点,如"8月11日 11:08"/"2025年8月11日 11:08")
+    # 用锚定匹配:仅当整个文本就是"日期+时间"才算详情页特征,
+    # 避免列表页长评论正文里子串含"2025年8月29日 12:15pm..."误判为详情页
+    _FULL_REPLY_DATE_PAT = re.compile(
+        r'^(\d{4}年\d{1,2}月\d{1,2}日|\d{1,2}月\d{1,2}日|\d{4}[-/.]\d{1,2}[-/.]\d{1,2})'
+        r'\s+\d{1,2}:\d{2}$'
+    )
+
+    # 评论列表筛选栏 tab(列表页聚合视图独有,单个评论详情页不会出现该组合)
+    # 反向排除用:命中 >=3 个即确认当前在列表页而非详情页,
+    # 兜底防止列表页残留星级卡(_SHOP_STAR_PAT)等被误判为详情页
+    _LIST_FILTER_TABS = ("全部", "最新", "差评", "中评")
+
     def detect_review_detail_page(self, xml_str: str) -> bool:
         """
         检测是否在评论详情页
@@ -421,8 +434,11 @@ class ADBHelper:
           - "发条友善评论吧":详情页评论区输入框(列表页为"说点什么吧~",不命中)
           - "这条评价内容有帮助吗":详情页独有
           - "发布于X月X日":详情页发布时间(列表页仅日期无前缀)
-          - "X月X日 时:分":详情页评论/回复带时间(列表页日期无时间)
+          - 独立"日期 时:分"节点:详情页评论/回复带时间(列表页日期无时间;
+            注意必须锚定整节点,列表页长评论正文子串含日期时间会误命中)
           - 顶部(y<250)同时有"分享"和"更多":详情页导航(列表页顶部为 规则/评价/搜索)
+        反向排除:命中评论列表筛选栏(全部/最新/差评/中评) >=3 个,确认在列表页,
+        直接返回 False,防止星级卡等列表页残留特征被误判为详情页。
         :return True=在详情页(需 back 返回);False=不在详情页
         """
         root = ET.fromstring(xml_str)
@@ -432,8 +448,6 @@ class ADBHelper:
             text = (node.attrib.get("text", "") + node.attrib.get("content-desc", "")).strip()
             if not text:
                 continue
-            if self._SHOP_STAR_PAT.search(text):
-                return True
             texts.append(text)
             bounds = node.attrib.get("bounds", "")
             coords = bounds.replace("][", ",").strip("[]").split(",")
@@ -443,6 +457,12 @@ class ADBHelper:
                         top_texts.append(text)
                 except ValueError:
                     pass
+        # 反向排除:列表筛选栏组合命中 >=3 个 -> 确认在评论列表页,非详情页
+        if sum(1 for t in texts if t in self._LIST_FILTER_TABS) >= 3:
+            return False
+        # 详情页特征判断(任一命中即判定)
+        if any(self._SHOP_STAR_PAT.search(t) for t in texts):
+            return True
         joined = "|".join(texts)
         if "发条友善评论吧" in joined:
             return True
@@ -450,7 +470,8 @@ class ADBHelper:
             return True
         if re.search(r"发布于\s*\d{1,2}月\d{1,2}日", joined):
             return True
-        if self._REPLY_DATE_PAT.search(joined):
+        # 仅当存在"整个文本=日期+时间"的独立节点才算详情页特征(锚定匹配)
+        if any(self._FULL_REPLY_DATE_PAT.match(t) for t in texts):
             return True
         if any("分享" in t for t in top_texts) and any("更多" in t for t in top_texts):
             return True

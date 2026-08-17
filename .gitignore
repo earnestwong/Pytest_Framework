@@ -17,3 +17,11 @@ reports/
 # 系统
 .DS_Store
 Thumbs.db
+
+# 临时调试脚本与运行日志(不提交)
+_diag*.py
+_test*.py
+_enter_review_list.py
+_retry_dump.py
+_scroll_to_tracy.py
+*.log
