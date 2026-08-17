@@ -627,50 +627,74 @@ def main():
         stray_scores = [c for c in cards if c.get("score") in POSITIVE_SCORES]
         if stray_scores:
             stray_users = "、".join(f"{c['user'] or '?'}({c['score']})" for c in stray_scores[:3])
-            print(f"  [守卫] 检测到非差评评分[{stray_users}],疑似已跳出差评列表")
-            # 恢复策略(不盲目 back(),逐级判断页面层级):
-            #   1. 仍在评论列表(有筛选栏):点击"差评"Tab 恢复筛选
-            #   2. 在详情页/商店主页:用 ensure_on_review_list back() 回列表后再试
-            #   3. 页面已无评论特征(如搜索页/首页):不可恢复,直接终止
-            restored = False
-            for attempt in range(2):
-                # 先尝试点击顶部筛选栏"差评"Tab 恢复(筛选栏在顶部 y<320 区域)
-                tab_items = [it for it in adb.extract_all_text(xml_str, min_len=1)
-                             if it["text"] == "差评" and it["bounds"][1] < 320]
-                if tab_items:
-                    bx = tab_items[0]["bounds"]
-                    cx, cy = (bx[0] + bx[2]) // 2, (bx[1] + bx[3]) // 2
-                    print(f"  [守卫] 点击'差评'Tab @ ({cx}, {cy}),第{attempt+1}次尝试")
-                    adb.tap(cx, cy, human=False)
-                    adb.human_delay(3.0, 4.0)
-                    xml_str = adb.dump_ui()
-                    new_cards = parser.parse(adb.extract_all_text(xml_str, min_len=1))
-                    new_stray = [c for c in new_cards if c.get("score") in POSITIVE_SCORES]
-                    if not new_stray:
-                        restored = True
-                        cards = new_cards
-                        print(f"  [守卫] 差评筛选已恢复,继续采集")
+            # 差评列表页滚动时会混入少量"推荐评价/精选"卡片(含好评·中评评分),
+            # 零星非差评卡片 ≠ 已跳出差评筛选。若误触发恢复会点击"差评"Tab,
+            # 导致列表重置回顶部,白费已滚动进度(去重虽防重复写入但时间浪费)。
+            # 判定原则:屏内仍能解析出差评卡片 → 判定仍在差评列表,
+            # 仅过滤混入的非差评卡片继续采集(CSV只写差评,数据仍纯净);
+            # 屏内完全无差评卡片 → 判定真跳出(可能进详情页/首页/商店主页),才执行恢复。
+            negative_cards = [c for c in cards
+                              if c.get("score") and c.get("score") not in POSITIVE_SCORES]
+            if negative_cards:
+                cards = [c for c in cards if c.get("score") not in POSITIVE_SCORES]
+                print(f"  [守卫] 非差评[{stray_users}]为列表混入推荐卡,过滤后继续采集(不重置列表)")
+            else:
+                # 屏内无差评卡片。先确认页面是否仍在评论列表结构内(顶部仍有"差评"筛选Tab):
+                # 若是,说明本屏只是推荐评价区/解析异常,页面并未跳出列表,
+                # 跳过本屏继续下滑(不点击Tab,避免重置回顶部浪费时间);
+                # 仅当页面连"差评"Tab都不存在(进了详情页/首页/商店主页)才执行恢复。
+                has_filter_tab = any(
+                    it["text"] == "差评" and it["bounds"][1] < 320
+                    for it in adb.extract_all_text(xml_str, min_len=1)
+                )
+                if has_filter_tab:
+                    cards = []
+                    print(f"  [守卫] 屏内无差评卡片但页面仍有'差评'Tab,判定本屏为推荐区,跳过继续下滑(不重置列表)")
+                else:
+                    print(f"  [守卫] 检测到非差评评分[{stray_users}],疑似已跳出差评列表")
+                    # 恢复策略(不盲目 back(),逐级判断页面层级):
+                    #   1. 仍在评论列表(有筛选栏):点击"差评"Tab 恢复筛选
+                    #   2. 在详情页/商店主页:用 ensure_on_review_list back() 回列表后再试
+                    #   3. 页面已无评论特征(如搜索页/首页):不可恢复,直接终止
+                    restored = False
+                    for attempt in range(2):
+                        # 先尝试点击顶部筛选栏"差评"Tab 恢复(筛选栏在顶部 y<320 区域)
+                        tab_items = [it for it in adb.extract_all_text(xml_str, min_len=1)
+                                     if it["text"] == "差评" and it["bounds"][1] < 320]
+                        if tab_items:
+                            bx = tab_items[0]["bounds"]
+                            cx, cy = (bx[0] + bx[2]) // 2, (bx[1] + bx[3]) // 2
+                            print(f"  [守卫] 点击'差评'Tab @ ({cx}, {cy}),第{attempt+1}次尝试")
+                            adb.tap(cx, cy, human=False)
+                            adb.human_delay(3.0, 4.0)
+                            xml_str = adb.dump_ui()
+                            new_cards = parser.parse(adb.extract_all_text(xml_str, min_len=1))
+                            new_stray = [c for c in new_cards if c.get("score") in POSITIVE_SCORES]
+                            if not new_stray:
+                                restored = True
+                                cards = new_cards
+                                print(f"  [守卫] 差评筛选已恢复,继续采集")
+                                break
+                            print(f"  [守卫] 点击'差评'Tab后仍有非差评评分,继续下一级恢复")
+                            continue
+                        # 无筛选栏:可能是详情页/商店主页(back()可回到列表)或搜索页(不可恢复)
+                        print(f"  [守卫] 页面无'差评'Tab,调用列表状态恢复(只处理详情页/商店主页)")
+                        list_ok, xml_str = ensure_on_review_list(xml_str)
+                        if not list_ok:
+                            print(f"  [守卫] 页面已无评论列表特征,不可恢复")
+                            break
+                        # 恢复后重新解析评分检查
+                        new_cards = parser.parse(adb.extract_all_text(xml_str, min_len=1))
+                        new_stray = [c for c in new_cards if c.get("score") in POSITIVE_SCORES]
+                        if not new_stray:
+                            restored = True
+                            cards = new_cards
+                            print(f"  [守卫] 已回到差评列表,继续采集")
+                            break
+                        print(f"  [守卫] 恢复后仍有非差评评分,继续尝试")
+                    if not restored:
+                        print(f"  [守卫] 无法恢复差评筛选,终止采集(防止混入好评)")
                         break
-                    print(f"  [守卫] 点击'差评'Tab后仍有非差评评分,继续下一级恢复")
-                    continue
-                # 无筛选栏:可能是详情页/商店主页(back()可回到列表)或搜索页(不可恢复)
-                print(f"  [守卫] 页面无'差评'Tab,调用列表状态恢复(只处理详情页/商店主页)")
-                list_ok, xml_str = ensure_on_review_list(xml_str)
-                if not list_ok:
-                    print(f"  [守卫] 页面已无评论列表特征,不可恢复")
-                    break
-                # 恢复后重新解析评分检查
-                new_cards = parser.parse(adb.extract_all_text(xml_str, min_len=1))
-                new_stray = [c for c in new_cards if c.get("score") in POSITIVE_SCORES]
-                if not new_stray:
-                    restored = True
-                    cards = new_cards
-                    print(f"  [守卫] 已回到差评列表,继续采集")
-                    break
-                print(f"  [守卫] 恢复后仍有非差评评分,继续尝试")
-            if not restored:
-                print(f"  [守卫] 无法恢复差评筛选,终止采集(防止混入好评)")
-                break
 
         # 3b. 孤立商家回复处理:第一个日期锚点之前的商家回复,属于上一屏最后一条评论
         #     场景:上一条评论全文展开后很长,上划后日期/用户名移出屏幕,
