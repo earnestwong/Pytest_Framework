@@ -1,6 +1,6 @@
 {
   "_comment": "大众点评采集脚本配置文件 - 同事按本机环境修改此文件即可,无需改代码",
-  "adb_path": "E:\\trae_projects\\Pytest_Framework\\tools\\platform-tools\\adb.exe",
+  "adb_path": "C:\\Program Files\\Netease\\MuMu\\nx_main\\adb.exe",
   "device": "",
   "swipe_mode": "auto",
   "scroll": 0,

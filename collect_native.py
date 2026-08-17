@@ -173,23 +173,51 @@ def main():
             w, h = adb.get_screen_size()
             # 详情页进入时可能自动滚动到最下方商家回复处(评论者头部在屏外)。
             # 先提取回复相关字段(此刻回复区可见,不依赖滚动位置),再处理身份信息。
+            # 注意:商家回复区是滚动触发的懒加载——长评论详情页(带图/语音/超长内容)
+            # 进入时不会自动滚到回复处,此时步骤1 reply_date 提取为空属正常,
+            # 后续步骤7(下滑重试)会触发懒加载并兜底提取,无需在步骤1前轮询等待。
             reply_date = adb.extract_merchant_reply_date(detail_xml)
             detail_info = adb.extract_detail_comment_info(detail_xml)
             detail_info["merchant_reply"] = adb.extract_detail_merchant_reply(detail_xml)
-            # 身份信息缺失(user/date 为空,通常因详情页已滚至回复区)时,
+            # 身份信息缺失(user 为空,通常因详情页已滚至回复区)时,
             # 向上滚动(内容下移)露出评论者头部再提取。
             # 注意:上滚后回复区可能滚出屏幕,但回复字段已在上方提取,不受影响
             # 长评论详情页(内容+回复接近整屏)进入时自动滚到回复区底部,
             # 一次上滚只露出发布时间,用户名仍在屏外,需循环上滚直到露出用户名。
+            # 循环条件分场景:
+            # - card is not None(常规复合匹配):只看 user。date 缺失不影响复合匹配
+            #   (回复全文/内容前缀都能通过),仅为 date 触发上滑会让商家回复区
+            #   滚出屏幕,导致 reply_date 提取失败时永久丢失 merchant_reply_date。
+            # - card is None(孤立回复场景):检查 user+date+score 三者齐全。
+            #   孤立回复拼回卡片需要完整身份信息(用户名+发布日期+评分)才能跨屏补回,
+            #   任一缺失都会导致拼回失败;且此时 reply_date 已在上方提取保存,
+            #   上滑使回复区滚出屏幕不影响 merchant_reply_date。
             for _scroll in range(3):
-                if (detail_info.get("user") or "").strip() \
-                        and (detail_info.get("date") or "").strip():
+                _has_user = (detail_info.get("user") or "").strip()
+                if card is not None:
+                    if _has_user:
+                        break
+                else:
+                    if _has_user \
+                            and (detail_info.get("date") or "").strip() \
+                            and (detail_info.get("score") or "").strip():
+                        break
+                # 守卫:上滑前已不在详情页(可能已滚回列表页),身份信息不可能再补全,
+                # 停止上滑,避免下次上滑后 user 被列表页噪声(如"规则")污染。
+                # 孤立场景三者齐全的强条件可能把页面滚出详情页,此守卫兜底。
+                if not adb.detect_review_detail_page(detail_xml):
+                    print(f"  [商家回复] 已不在详情页,停止上滑并保留已有身份信息")
                     break
-                print(f"  [商家回复] 详情页身份信息缺失(可能已滚至回复区),向上滚动露出评论者信息({_scroll + 1}/3)")
+                print(f"  [商家回复] 详情页用户名缺失(可能已滚至回复区),向上滚动露出评论者头部({_scroll + 1}/3)")
                 # 上滚(内容下移)露出评论者头部:小步慢速,避免惯性滚动把头部又甩出屏幕
                 adb.swipe(w // 2, int(h * 0.40), w // 2, int(h * 0.80), duration_ms=900, human=False)
                 adb.human_delay(1.0, 1.5)
                 detail_xml = adb.dump_ui()
+                # 上滑后若已滚出详情页(回到列表页),丢弃这次滚出后的提取结果,
+                # 保留进入详情页时/上次上滑后的合法身份信息,防止被列表噪声污染
+                if not adb.detect_review_detail_page(detail_xml):
+                    print(f"  [商家回复] 上滑后已滚出详情页,停止上滑并保留已有身份信息")
+                    break
                 new_info = adb.extract_detail_comment_info(detail_xml)
                 detail_info = {
                     "user": new_info.get("user", "") or detail_info.get("user", ""),
@@ -822,6 +850,61 @@ def main():
                                 old_card["merchant_reply"] = new_card["merchant_reply"]
                                 old_card["merchant_reply_bounds"] = new_card.get("merchant_reply_bounds") or old_card.get("merchant_reply_bounds")
                                 print(f"  [补救] 补全商家回复: [{old_card.get('user') or '?'}] {old_card.get('date')}")
+                            break
+                # 下滑后坐标已变,更新 xml_str 供后续 3d 定位使用
+                xml_str = retry_xml
+
+        # 3c3. 评分缺失补救:user+date+content 都抓到但 score 缺失,
+        #      通常因前一条超长评论(全文展开)挤占屏幕导致本条评分节点滚出屏外未 dump 到。
+        #      小幅下滑让评分节点露出再重新解析补全。
+        #      注意:差评筛选列表的评分节点文本必为负面档位(很差/较差/很糟糕/糟糕),
+        #      位置在用户名+日期下方约 60-150px。下滑 200px 足以让屏外的评分节点露出,
+        #      又不会把屏幕中间评论的头部滚出顶部。仅对评论头部(date_bounds)在屏幕
+        #      下半部分(>0.45h)的卡片生效,避免对顶部评论无意义下滑挤出底部内容。
+        missing_score = [
+            c for c in cards
+            if c.get("user", "").strip()
+            and c.get("date", "").strip()
+            and c.get("content", "").strip()
+            and not (c.get("score") or "").strip()
+        ]
+        if missing_score:
+            w, h = adb.get_screen_size()
+            bottom_cards = [
+                c for c in missing_score
+                if c.get("date_bounds")
+                and c["date_bounds"][1] > int(h * 0.45)
+            ]
+            if bottom_cards:
+                print(f"  [补救] {len(bottom_cards)} 条评论评分缺失,小幅下滑露出评分节点")
+                y1 = int(h * 0.75)
+                y2 = y1 - 200  # 下滑 200px,与3c2一致
+                adb.swipe(w // 2, y1, w // 2, y2, duration_ms=600, human=False)
+                adb.human_delay(1.0, 1.5)
+                retry_xml = adb.dump_ui()
+                new_items = adb.extract_all_text(retry_xml, min_len=1)
+                new_cards = parser.parse(new_items)
+                for old_card in cards:
+                    if (old_card.get("score") or "").strip():
+                        continue
+                    old_key = f"{old_card.get('date', '')}|{(old_card.get('content') or '')[:20]}"
+                    for new_card in new_cards:
+                        new_key = f"{new_card.get('date', '')}|{(new_card.get('content') or '')[:20]}"
+                        if new_key == old_key:
+                            # 同步坐标,3d 定位使用最新坐标
+                            old_card["content_bounds"] = new_card.get("content_bounds") or old_card.get("content_bounds")
+                            old_card["date_bounds"] = new_card.get("date_bounds") or old_card.get("date_bounds")
+                            if (new_card.get("score") or "").strip():
+                                old_card["score"] = new_card["score"]
+                                # 同步到 summarizer.cards(类似3d的merchant_reply同步)
+                                # 否则补救补全的评分会因summarizer去重时丢弃本地副本而丢失,
+                                # 导致 CSV rating 字段为空
+                                dedup_key = summarizer._dedup_key(old_card)
+                                for sc in summarizer.cards:
+                                    if summarizer._dedup_key(sc) == dedup_key:
+                                        sc["score"] = old_card["score"]
+                                        break
+                                print(f"  [补救] 补全评分: [{old_card.get('user') or '?'}] {old_card.get('date')} → {old_card['score']}")
                             break
                 # 下滑后坐标已变,更新 xml_str 供后续 3d 定位使用
                 xml_str = retry_xml
