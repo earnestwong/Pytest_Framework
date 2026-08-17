@@ -31,6 +31,7 @@ class ADBHelper:
         self.device_serial = device_serial
         self.adb_path = adb_path
         self._base_cmd = [adb_path]
+        self._screen_size: Optional[Tuple[int, int]] = None  # 屏幕尺寸缓存(分辨率在会话中不变)
         if server_port:
             os.environ["ANDROID_ADB_SERVER_PORT"] = server_port
         if device_serial:
@@ -83,11 +84,14 @@ class ADBHelper:
     # ---------- 设备信息 ----------
 
     def get_screen_size(self) -> Tuple[int, int]:
-        """获取屏幕分辨率"""
+        """获取屏幕分辨率(带缓存,分辨率在会话中不变)"""
+        if self._screen_size:
+            return self._screen_size
         out = self.shell("wm size")
         # 形如 "Physical size: 1080x1920"
         parts = out.split(":")[-1].strip().split("x")
-        return int(parts[0]), int(parts[1])
+        self._screen_size = (int(parts[0]), int(parts[1]))
+        return self._screen_size
 
     def get_current_package(self) -> str:
         """
@@ -436,12 +440,17 @@ class ADBHelper:
           - "发布于X月X日":详情页发布时间(列表页仅日期无前缀)
           - 独立"日期 时:分"节点:详情页评论/回复带时间(列表页日期无时间;
             注意必须锚定整节点,列表页长评论正文子串含日期时间会误命中)
-          - 顶部(y<250)同时有"分享"和"更多":详情页导航(列表页顶部为 规则/评价/搜索)
+          - 顶部(屏幕高度13%内)同时有"分享"和"更多":详情页导航(列表页顶部为 规则/评价/搜索)
         反向排除:命中评论列表筛选栏(全部/最新/差评/中评) >=3 个,确认在列表页,
         直接返回 False,防止星级卡等列表页残留特征被误判为详情页。
         :return True=在详情页(需 back 返回);False=不在详情页
         """
         root = ET.fromstring(xml_str)
+        try:
+            _, screen_h = self.get_screen_size()
+        except Exception:
+            screen_h = 1920  # adb 不可用时(如离线测试)降级到默认高度
+        top_threshold = int(screen_h * 0.13)  # 顶部导航栏区域(自适应:屏幕高度13%)
         texts = []
         top_texts = []
         for node in root.iter("node"):
@@ -453,7 +462,7 @@ class ADBHelper:
             coords = bounds.replace("][", ",").strip("[]").split(",")
             if len(coords) == 4:
                 try:
-                    if int(coords[1]) < 250:  # 顶部导航栏区域
+                    if int(coords[1]) < top_threshold:  # 顶部导航栏区域(自适应)
                         top_texts.append(text)
                 except ValueError:
                     pass

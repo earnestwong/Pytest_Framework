@@ -499,6 +499,7 @@ def main():
     # 无限模式:通过识别"已折叠部分评价"文本判定到底;固定模式:按 args.scroll 滑
     FOLD_HINT = "已折叠部分评价"  # 评论列表到底时点评显示的提示文本
     screen_idx = 0
+    no_neg_screen_count = 0  # 连续"屏内无差评卡片"计数(>=2 才判定真跳出,防单屏偶发误判)
     while True:
         # 固定模式:达到屏数上限则停
         if not infinite and screen_idx >= args.scroll:
@@ -627,40 +628,35 @@ def main():
         stray_scores = [c for c in cards if c.get("score") in POSITIVE_SCORES]
         if stray_scores:
             stray_users = "、".join(f"{c['user'] or '?'}({c['score']})" for c in stray_scores[:3])
-            # 差评列表页滚动时会混入少量"推荐评价/精选"卡片(含好评·中评评分),
-            # 零星非差评卡片 ≠ 已跳出差评筛选。若误触发恢复会点击"差评"Tab,
-            # 导致列表重置回顶部,白费已滚动进度(去重虽防重复写入但时间浪费)。
-            # 判定原则:屏内仍能解析出差评卡片 → 判定仍在差评列表,
-            # 仅过滤混入的非差评卡片继续采集(CSV只写差评,数据仍纯净);
-            # 屏内完全无差评卡片 → 判定真跳出(可能进详情页/首页/商店主页),才执行恢复。
+            # 判定是否仍在差评页:看屏幕上列出的评论评分,不看是否有"差评"Tab
+            # ("全部评价"页顶部也有"差评"Tab,无法区分;只有评论评分能确认)。
+            # 差评列表滚动时会混入少量"推荐评价/精选"卡片(好评·中评),
+            # 屏内仍有差评卡片 → 判定仍在差评页,仅过滤非差评卡片继续采集(不重置);
+            # 屏内完全无差评卡片 → 连续 2 屏(no_neg_screen_count>=2)才判定真跳出,
+            # 防单屏偶发(长评论展开后评分滚出屏幕/整屏图片)误判,避免重置回顶部浪费进度。
             negative_cards = [c for c in cards
                               if c.get("score") and c.get("score") not in POSITIVE_SCORES]
             if negative_cards:
+                no_neg_screen_count = 0
                 cards = [c for c in cards if c.get("score") not in POSITIVE_SCORES]
-                print(f"  [守卫] 非差评[{stray_users}]为列表混入推荐卡,过滤后继续采集(不重置列表)")
+                print(f"  [守卫] 非差评[{stray_users}]为混入推荐卡,过滤后继续采集(不重置列表)")
             else:
-                # 屏内无差评卡片。先确认页面是否仍在评论列表结构内(顶部仍有"差评"筛选Tab):
-                # 若是,说明本屏只是推荐评价区/解析异常,页面并未跳出列表,
-                # 跳过本屏继续下滑(不点击Tab,避免重置回顶部浪费时间);
-                # 仅当页面连"差评"Tab都不存在(进了详情页/首页/商店主页)才执行恢复。
-                has_filter_tab = any(
-                    it["text"] == "差评" and it["bounds"][1] < 320
-                    for it in adb.extract_all_text(xml_str, min_len=1)
-                )
-                if has_filter_tab:
+                no_neg_screen_count += 1
+                print(f"  [守卫] 屏内无差评评论[{stray_users}],连续{no_neg_screen_count}/2屏")
+                if no_neg_screen_count < 2:
                     cards = []
-                    print(f"  [守卫] 屏内无差评卡片但页面仍有'差评'Tab,判定本屏为推荐区,跳过继续下滑(不重置列表)")
+                    print(f"  [守卫] 暂缓判定,跳过本屏继续下滑(防单屏偶发误判)")
                 else:
-                    print(f"  [守卫] 检测到非差评评分[{stray_users}],疑似已跳出差评列表")
+                    print(f"  [守卫] 连续2屏无差评评论,判定已跳出差评列表")
                     # 恢复策略(不盲目 back(),逐级判断页面层级):
-                    #   1. 仍在评论列表(有筛选栏):点击"差评"Tab 恢复筛选
-                    #   2. 在详情页/商店主页:用 ensure_on_review_list back() 回列表后再试
-                    #   3. 页面已无评论特征(如搜索页/首页):不可恢复,直接终止
+                    #   1. 尝试点击"差评"Tab 恢复筛选(全屏搜索,不依赖坐标)
+                    #   2. 无"差评"Tab:可能是详情页/商店主页(back()可回到列表)或搜索页(不可恢复)
                     restored = False
                     for attempt in range(2):
-                        # 先尝试点击顶部筛选栏"差评"Tab 恢复(筛选栏在顶部 y<320 区域)
+                        # 全屏搜索"差评"文本(筛选栏Tab),取最顶部节点
                         tab_items = [it for it in adb.extract_all_text(xml_str, min_len=1)
-                                     if it["text"] == "差评" and it["bounds"][1] < 320]
+                                     if it["text"] == "差评"]
+                        tab_items.sort(key=lambda it: it["bounds"][1])
                         if tab_items:
                             bx = tab_items[0]["bounds"]
                             cx, cy = (bx[0] + bx[2]) // 2, (bx[1] + bx[3]) // 2
@@ -669,15 +665,17 @@ def main():
                             adb.human_delay(3.0, 4.0)
                             xml_str = adb.dump_ui()
                             new_cards = parser.parse(adb.extract_all_text(xml_str, min_len=1))
-                            new_stray = [c for c in new_cards if c.get("score") in POSITIVE_SCORES]
-                            if not new_stray:
+                            new_neg = [c for c in new_cards
+                                       if c.get("score") and c.get("score") not in POSITIVE_SCORES]
+                            if new_neg:
                                 restored = True
                                 cards = new_cards
+                                no_neg_screen_count = 0
                                 print(f"  [守卫] 差评筛选已恢复,继续采集")
                                 break
-                            print(f"  [守卫] 点击'差评'Tab后仍有非差评评分,继续下一级恢复")
+                            print(f"  [守卫] 点击'差评'Tab后仍无差评评论,继续下一级恢复")
                             continue
-                        # 无筛选栏:可能是详情页/商店主页(back()可回到列表)或搜索页(不可恢复)
+                        # 无"差评"Tab:可能是详情页/商店主页(back()可回到列表)或搜索页(不可恢复)
                         print(f"  [守卫] 页面无'差评'Tab,调用列表状态恢复(只处理详情页/商店主页)")
                         list_ok, xml_str = ensure_on_review_list(xml_str)
                         if not list_ok:
@@ -685,16 +683,20 @@ def main():
                             break
                         # 恢复后重新解析评分检查
                         new_cards = parser.parse(adb.extract_all_text(xml_str, min_len=1))
-                        new_stray = [c for c in new_cards if c.get("score") in POSITIVE_SCORES]
-                        if not new_stray:
+                        new_neg = [c for c in new_cards
+                                   if c.get("score") and c.get("score") not in POSITIVE_SCORES]
+                        if new_neg:
                             restored = True
                             cards = new_cards
+                            no_neg_screen_count = 0
                             print(f"  [守卫] 已回到差评列表,继续采集")
                             break
-                        print(f"  [守卫] 恢复后仍有非差评评分,继续尝试")
+                        print(f"  [守卫] 恢复后仍无差评评论,继续尝试")
                     if not restored:
                         print(f"  [守卫] 无法恢复差评筛选,终止采集(防止混入好评)")
                         break
+        else:
+            no_neg_screen_count = 0
 
         # 3b. 孤立商家回复处理:第一个日期锚点之前的商家回复,属于上一屏最后一条评论
         #     场景:上一条评论全文展开后很长,上划后日期/用户名移出屏幕,
