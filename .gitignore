@@ -25,3 +25,5 @@ _enter_review_list.py
 _retry_dump.py
 _scroll_to_tracy.py
 *.log
+*_pad_dump*.xml
+*-最新一次试跑*.txt
