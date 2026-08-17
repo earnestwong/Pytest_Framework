@@ -636,12 +636,16 @@ class ADBHelper:
         :return 用户名,未找到返回空串
         """
         items = self.extract_all_text(xml_str, min_len=1)
+        # 详情页顶部区域高度:用户名/头像在屏幕顶部,用比例而非固定像素,
+        # 兼容不同分辨率(手机/平板详情页顶部布局高度不同)
+        _, screen_h = self.get_screen_size()
+        top_limit = int(screen_h * 0.16)
         for it in items:
             bx = it["bounds"]
             # 过滤零面积元素(bounds如[0,0][0,0]的y=0会排在用户名前,干扰提取)
             if bx[2] <= bx[0] or bx[3] <= bx[1]:
                 continue
-            if bx[1] >= 300:
+            if bx[1] >= top_limit:
                 break  # 已超出顶部区域(节点按y升序),未找到用户名
             text = it["text"]
             if text in self._DETAIL_TOP_NOISE:
@@ -706,12 +710,15 @@ class ADBHelper:
 
         # 3. 提取评论内容前缀
         #    找到用户名节点索引(同 extract_detail_user 逻辑),从其后的位置开始扫描
+        #    顶部区域高度同样用比例(与 extract_detail_user 的 top_limit 一致)
+        _, screen_h = self.get_screen_size()
+        top_limit = int(screen_h * 0.16)
         user_idx = -1
         for i, it in enumerate(items):
             bx = it["bounds"]
             if bx[2] <= bx[0] or bx[3] <= bx[1]:
                 continue
-            if bx[1] >= 300:
+            if bx[1] >= top_limit:
                 break
             text = it["text"]
             if text in self._DETAIL_TOP_NOISE:

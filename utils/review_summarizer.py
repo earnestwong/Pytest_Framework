@@ -3,6 +3,7 @@
 原生文本通道和 OCR 通道共用此模块
 """
 import os
+import re
 import json
 from typing import List, Dict
 from datetime import datetime
@@ -47,10 +48,15 @@ class ReviewSummarizer:
 
     @staticmethod
     def _dedup_key(card: Dict) -> str:
-        """去重 key:用户名 + 日期 + 内容前20字符"""
+        """去重 key:用户名 + 日期 + 内容前20字符(忽略评分前缀)"""
         user = (card.get("user") or "").strip()
         date = (card.get("date") or "").strip()
-        content = (card.get("content") or "").strip()[:20]
+        content = (card.get("content") or "").strip()
+        # 同一评论在列表页解析时 content 以"口味:1.5\n环境:1.5\n服务:1.5\n"
+        # 评分前缀开头,而孤立回复跨屏拼回时 content 无此前缀,导致 content[:20]
+        # 不同而无法去重。剥离开头连续的多行评分前缀后再取前20字,归一化一致。
+        content = re.sub(r'^(?:(?:口味|环境|服务|性价比):\s*[\d.]+\s*\n?)+', '', content)
+        content = content[:20]
         return f"{user}|{date}|{content}"
 
     def to_dict(self) -> Dict:

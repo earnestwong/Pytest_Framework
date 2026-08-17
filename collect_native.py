@@ -122,7 +122,41 @@ def main():
     )
     print(f"CSV 文件: {csv_path}(增量写入)")
 
-    def get_reply_date_from_detail(candidates, card=None):
+    def _filter_tab_y_range(xml_str):
+        """检测评论列表筛选栏 tab 行的 y 区间(全部/最新/差评/中评/带图/视频/筛选)。
+        筛选栏吸顶固定在屏幕顶部,点击该区间的候选会被筛选 tab 拦截(误切"中评"等)。
+        :return (y_top, y_bottom);未检测到筛选栏返回 None
+        """
+        tab_words = {"全部", "最新", "差评", "中评", "筛选", "带图/视频"}
+        try:
+            _, screen_h = adb.get_screen_size()
+        except Exception:
+            screen_h = 2400
+        ys = []
+        try:
+            root = ET.fromstring(xml_str)
+        except Exception:
+            return None
+        for node in root.iter("node"):
+            t = (node.attrib.get("text", "") or node.attrib.get("content-desc", "")).strip()
+            if t not in tab_words:
+                continue
+            b = node.attrib.get("bounds", "")
+            coords = b.replace("][", ",").strip("[]").split(",")
+            if len(coords) != 4:
+                continue
+            try:
+                _, y1, _, y2 = map(int, coords)
+            except ValueError:
+                continue
+            if y1 > int(screen_h * 0.3):  # 筛选栏吸顶,只取上半屏的 tab,避免内容噪声
+                continue
+            ys.extend([y1, y2])
+        if not ys:
+            return None
+        return (min(ys), max(ys))
+
+    def get_reply_date_from_detail(candidates, card=None, near_y=None):
         """
         点击候选元素进入详情页,提取商家回复日期(含下滑重试)
         规则:点开商家回复后,详情页顶部能抓到该评论的用户名(权威归属)。
@@ -143,7 +177,42 @@ def main():
             # 注意:精确匹配 y 范围放宽到 3%~98% 是为了跨屏残留回复能命中,
             # 但导航区候选必须滚动露出后才能点击,否则白白浪费一次候选尝试。
             w0, h0 = adb.get_screen_size()
-            if y > int(h0 * 0.90) or y < int(h0 * 0.10):
+            tab_range = _filter_tab_y_range(adb.dump_ui())
+            if tab_range and tab_range[0] - 5 <= y <= tab_range[1] + 5:
+                # 候选落在筛选栏 tab 行内(吸顶筛选栏遮挡,如"中评"tab y≈280-328),
+                # 直接点击会误触筛选切换列表,必须滚动把回复露到筛选栏下方再定位点击。
+                print(f"  [商家回复] 候选@({x},{y})位于筛选栏tab行[{tab_range}],小幅滚动露出后重新定位")
+                adb.swipe(w0 // 2, int(h0 * 0.40), w0 // 2, int(h0 * 0.65), duration_ms=600, human=False)
+                adb.human_delay(1.0, 1.5)
+                detail_xml = adb.dump_ui()
+                # 用候选完整可见回复内容重新定位(与find_reply_candidates精确匹配一致,
+                # 避免同屏多条相似前缀回复时误选其他评论的回复)
+                search_texts = []
+                if card and (card.get("merchant_reply") or "").strip():
+                    search_texts.append(card["merchant_reply"])
+                if (btn["text"] or "").strip():
+                    search_texts.append(btn["text"])
+                if len(btn["text"]) > 40:
+                    search_texts.append(btn["text"][:40])
+                reloc = []
+                for st in search_texts:
+                    cands = [b for b in adb.find_elements_by_text(detail_xml, st)
+                             if int(h0 * 0.10) < b["center"][1] < int(h0 * 0.90)]
+                    new_tab_range = _filter_tab_y_range(detail_xml)
+                    if new_tab_range:
+                        cands = [b for b in cands
+                                 if not (new_tab_range[0] - 5 <= b["center"][1] <= new_tab_range[1] + 5)]
+                    if cands:
+                        reloc = cands
+                        break
+                if not reloc:
+                    print(f"  [商家回复] 滚动后未找到该候选,尝试下一个候选")
+                    continue
+                if near_y is not None:
+                    reloc.sort(key=lambda b: abs(b["center"][1] - near_y))
+                x, y = reloc[0]["center"]
+                print(f"  [商家回复] 滚动后重新定位 @ ({x}, {y}) text=[{btn['text'][:15]}]")
+            elif y > int(h0 * 0.90) or y < int(h0 * 0.10):
                 print(f"  [商家回复] 候选@({x},{y})位于导航区,小幅滚动露出后重新定位")
                 if y > int(h0 * 0.90):
                     # 底部:下滑(内容上移)露出底部回复
@@ -153,13 +222,36 @@ def main():
                     adb.swipe(w0 // 2, int(h0 * 0.45), w0 // 2, int(h0 * 0.70), duration_ms=600, human=False)
                 adb.human_delay(1.0, 1.5)
                 detail_xml = adb.dump_ui()
-                # 用候选文本前40字重新定位(与find_reply_candidates精确匹配一致,
-                # 避免同屏多条相似前缀回复时误选其他评论的回复)
-                reloc = [b for b in adb.find_elements_by_text(detail_xml, btn["text"][:40])
-                         if int(h0 * 0.10) < b["center"][1] < int(h0 * 0.90)]
+                # 用候选完整可见回复内容重新定位(与find_reply_candidates精确匹配一致,
+                # 避免同屏多条相似前缀回复时误选其他评论的回复):
+                # 优先用卡片可见的全部回复内容(含"丰裕(商家)"标签),匹配不到时回退
+                # 到候选节点全文,再回退到前40字(长文本可能被 uiautomator 截断)。
+                # 注意:丰裕等多条同模板回复内容完全相同,全文也分不出彼此,
+                # 因此最后必须按 near_y 距离排序,选离目标卡片内容底部最近的那条,
+                # 并排除筛选栏 tab 行内的候选(滚动后可能被吸顶筛选栏遮挡,点击会误触筛选)。
+                tab_range = _filter_tab_y_range(detail_xml)
+                search_texts = []
+                if card and (card.get("merchant_reply") or "").strip():
+                    search_texts.append(card["merchant_reply"])
+                if (btn["text"] or "").strip():
+                    search_texts.append(btn["text"])
+                if len(btn["text"]) > 40:
+                    search_texts.append(btn["text"][:40])
+                reloc = []
+                for st in search_texts:
+                    cands = [b for b in adb.find_elements_by_text(detail_xml, st)
+                             if int(h0 * 0.10) < b["center"][1] < int(h0 * 0.90)]
+                    if tab_range:
+                        cands = [b for b in cands
+                                 if not (tab_range[0] - 5 <= b["center"][1] <= tab_range[1] + 5)]
+                    if cands:
+                        reloc = cands
+                        break
                 if not reloc:
                     print(f"  [商家回复] 滚动后未找到该候选,尝试下一个候选")
                     continue
+                if near_y is not None:
+                    reloc.sort(key=lambda b: abs(b["center"][1] - near_y))
                 x, y = reloc[0]["center"]
                 print(f"  [商家回复] 滚动后重新定位 @ ({x}, {y}) text=[{btn['text'][:15]}]")
             print(f"  [商家回复] 尝试点击 @ ({x}, {y}) text=[{btn['text'][:15]}]")
@@ -326,23 +418,33 @@ def main():
             return (b["center"][1],)
 
         prefix_m = re.match(r'^(?:商家回复|.+?[（(]商家[）)]|商家)\s*[:：]\s*', reply_text)
-        # 1. 优先:用回复内容前40字精确匹配(定位到具体哪条回复)
-        #    多个回复常以"亲爱的顾客/尊敬的顾客"开头,15字不足以区分,
-        #    40字后不同回复内容差异明显,能精确定位到正确回复节点
+        # 1. 优先:用回复内容精确匹配(定位到具体哪条回复)
+        #    搜索词优先用"卡片上可见的全部回复内容"(去标签后完整文本),
+        #    完整文本在长回复里比前40字区分度更高,能精确定位到正确回复节点;
+        #    但 uiautomator 节点文本可能被截断(长回复只保留部分),完整文本
+        #    匹配不到时回退到去标签后前40字。
         #    注意:长评论(内容+图片+回复接近一屏)跨屏时,回复可能残留在屏幕
         #    顶部(y<16%)或底部(y>90%),此时严格 y_min/y_max 过滤会把该回复排除,
         #    导致精确匹配0候选,回退模糊匹配时误点到同屏其他评论的回复。
-        #    精确匹配用的搜索词是回复全文前40字(如"我们非常重视您的意见"),
+        #    精确匹配用的搜索词是回复全文(或前40字,如"我们非常重视您的意见"),
         #    导航/搜索/底部操作栏都不会出现该文本,故 y 范围放宽到 3%~98%
         #    (仅排除状态栏与底部导航),允许跨屏残留的回复命中。
         if prefix_m:
-            search_text = reply_text[prefix_m.end():prefix_m.end() + 40]
+            full_content = reply_text[prefix_m.end():]
+            search_texts = [full_content]
+            if len(full_content) > 40:
+                search_texts.append(full_content[:40])
             y_lo = int(screen_h * 0.03)
             y_hi = int(screen_h * 0.98)
-            candidates = [b for b in adb.find_elements_by_text(xml, search_text)
-                          if y_lo < b["center"][1] < y_hi
-                          and "语音评价" not in b["text"]
-                          and "图片" not in b["text"] and "播放" not in b["text"]]
+            candidates = []
+            for st in search_texts:
+                cands = [b for b in adb.find_elements_by_text(xml, st)
+                         if y_lo < b["center"][1] < y_hi
+                         and "语音评价" not in b["text"]
+                         and "图片" not in b["text"] and "播放" not in b["text"]]
+                if cands:
+                    candidates = cands
+                    break
             if candidates:
                 candidates.sort(key=_sort_key)
                 return candidates
@@ -854,10 +956,11 @@ def main():
             if bottom_cards:
                 print(f"  [补救] {len(bottom_cards)} 条评论在屏幕底部但回复缺失,小幅下滑露出回复")
                 y1 = int(h * 0.75)
-                # 下滑 200px 露出底部回复:足够把屏底评论的回复节点拉进屏幕,
-                # 又不会把顶部评论的回复挤出屏幕顶部/导航区(400px会导致顶部回复
-                # 滚入 y<16% 导航区,被 find_reply_candidates 过滤,3d 定位不到)
-                y2 = y1 - 200
+                # 下滑 8% 屏高露出底部回复:足够把屏底评论的回复节点拉进屏幕,
+                # 又不会把顶部评论的回复挤出屏幕顶部/导航区(下滑 >16% 屏高会导致
+                # 顶部回复滚入 y<16% 导航区,被 find_reply_candidates 过滤,3d 定位不到)
+                # 用比例而非固定像素,保证不同分辨率(手机/平板)下滑距离一致
+                y2 = y1 - int(h * 0.08)
                 adb.swipe(w // 2, y1, w // 2, y2, duration_ms=600, human=False)
                 adb.human_delay(1.0, 1.5)
                 retry_xml = adb.dump_ui()
@@ -904,7 +1007,7 @@ def main():
             if bottom_cards:
                 print(f"  [补救] {len(bottom_cards)} 条评论评分缺失,小幅下滑露出评分节点")
                 y1 = int(h * 0.75)
-                y2 = y1 - 200  # 下滑 200px,与3c2一致
+                y2 = y1 - int(h * 0.08)  # 下滑 8% 屏高,与3c2一致(比例自适应分辨率)
                 adb.swipe(w // 2, y1, w // 2, y2, duration_ms=600, human=False)
                 adb.human_delay(1.0, 1.5)
                 retry_xml = adb.dump_ui()
@@ -1005,7 +1108,7 @@ def main():
                     # 传card:函数内部对每个候选做复合匹配,失败则自动back继续下一个候选,
                     # 直到找到身份匹配的回复详情页(解决多条回复同前缀时定位到错误回复的问题)
                     entered, reply_date, detail_info = get_reply_date_from_detail(
-                        candidates, card=card)
+                        candidates, card=card, near_y=near_y)
                     if entered:
                         break
                 if not entered:
