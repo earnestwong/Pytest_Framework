@@ -1220,25 +1220,26 @@ def main():
                        for sc in summarizer.cards):
                     print(f"  [商家回复] 该卡片回复日期已获取,跳过")
                     continue
-                # 定位并点击:最多尝试3种屏幕状态(当前/反向/正向滚动)。
+                # 定位并点击:最多尝试3种屏幕状态(当前/正向/反向滚动)。
                 # 前一张卡片处理时可能滚动过(详情页back、重试滚动),列表位置已变,
                 # 旧坐标(merchant_reply_bounds)失效,因此每种状态都重新dump定位。
                 # 滚动方向场景:
+                #   正向(内容上移):回复被长内容/图片挤出屏幕底部下方(屏外)时露出
+                #     ——主场景,优先尝试(3c2补救只下滑8%,目标卡回复常在屏底下方)
                 #   反向(内容下移):回复被3c2补救下滑挤出屏幕顶部/导航区(y<16%,被过滤)时拉回
-                #   正向(内容上移):回复在屏幕底部下方(屏幕外)时露出
                 w2, h2 = adb.get_screen_size()
                 entered = False
                 reply_date = ""
                 detail_info = None
-                for attempt, scroll in enumerate([None, "backward", "forward"]):
+                for attempt, scroll in enumerate([None, "forward", "backward"]):
                     if attempt > 0:
                         # 状态滚动:小步慢速(距离≤35%屏、时长≥900ms),避免快速滑动
                         # 触发惯性滚动(惯性可能一次滚近一整屏,把目标卡片甩出屏幕)。
-                        # backward=内容下移(往回滚),forward=内容上移(向前滚)
-                        if scroll == "backward":
-                            adb.swipe(w2 // 2, int(h2 * 0.45), w2 // 2, int(h2 * 0.80), duration_ms=900, human=False)
-                        else:
+                        # forward=内容上移(向前滚),backward=内容下移(往回滚)
+                        if scroll == "forward":
                             adb.swipe(w2 // 2, int(h2 * 0.70), w2 // 2, int(h2 * 0.40), duration_ms=900, human=False)
+                        else:
+                            adb.swipe(w2 // 2, int(h2 * 0.45), w2 // 2, int(h2 * 0.80), duration_ms=900, human=False)
                         adb.human_delay(1.0, 1.5)
                     fresh_xml = adb.dump_ui()
                     fresh_items = adb.extract_all_text(fresh_xml, min_len=1)
@@ -1252,8 +1253,24 @@ def main():
                             if fc.get("content_bounds"):
                                 near_y = fc["content_bounds"][3]
                             break
-                    candidates = find_reply_candidates(
-                        fresh_xml, card["merchant_reply"], y_max, near_y=near_y)
+                    # 当前屏(无滚动)优先用卡片记录的回复精确坐标(3c2补救/解析时记录的
+                    # 本卡回复位置),避免 find_reply_candidates 混入同屏其他评论的同模板
+                    # 回复导致反复点错;坐标失效才回退模糊匹配。
+                    candidates = None
+                    if attempt == 0:
+                        mrb = card.get("merchant_reply_bounds")
+                        if mrb:
+                            bx1, by1, bx2, by2 = mrb
+                            if bx2 > bx1 and by2 > by1:
+                                cx, cy = (bx1 + bx2) // 2, (by1 + by2) // 2
+                                if _coord_still_valid(fresh_xml, cx, cy,
+                                                      card.get("merchant_reply", "")):
+                                    candidates = [{"text": card["merchant_reply"],
+                                                   "bounds": mrb, "center": (cx, cy)}]
+                                    print(f"  [商家回复] 使用卡片记录的回复坐标 @ ({cx}, {cy})")
+                    if not candidates:
+                        candidates = find_reply_candidates(
+                            fresh_xml, card["merchant_reply"], y_max, near_y=near_y)
                     state_name = "当前" if scroll is None else ("反向" if scroll == "backward" else "正向")
                     if not candidates:
                         print(f"  [商家回复] {state_name}屏幕未找到回复元素,尝试滚动")
