@@ -175,6 +175,21 @@ def main():
         """
         for btn in candidates:
             x, y = btn["center"]
+            # 修复: 候选坐标有效期校验(多候选滚动场景根因)
+            # 候选坐标来自候选列表生成时的dump, 但循环内任一候选的处理都可能滚动列表
+            # (tab行重定位滚动/导航区滚动/详情页back往返)。此时后续候选的原始坐标已过期
+            # ——旧逻辑直接 tap 会把过期坐标点到大钱9图评论的图片上, 误入全屏看图页。
+            # tap 前用最新 dump 校验: 原坐标处必须仍命中同源回复文本且不在图片/播放上;
+            # 过期则用候选文本在当前屏重定位(过滤图片/播放、tab行、导航区、语音评价),
+            # 重定位失败则跳过该候选, 绝不使用过期坐标 tap。
+            cur_xml = adb.dump_ui()
+            if not _coord_still_valid(cur_xml, x, y, btn["text"]):
+                reloc = _fixed_relocate(cur_xml, btn["text"], near_y=near_y)
+                if reloc is None:
+                    print(f"  [商家回复] 候选@({x},{y})坐标已过期且无法在当前屏重定位,跳过")
+                    continue
+                x, y = reloc["center"]
+                print(f"  [商家回复] 候选坐标过期,重定位 @ ({x}, {y}) text=[{btn['text'][:15]}]")
             # 候选落在屏幕顶部/底部导航区时点击无效(点评底部Tab/顶部状态栏拦截):
             # 该回复可能只露出屏幕边缘一条,中心点在导航栏上,直接 tap 会被拦截。
             # 先小幅滚动把回复露到可点击区,再重新定位点击。
@@ -263,7 +278,14 @@ def main():
             adb.human_delay(1.5, 2.5)
             detail_xml = adb.dump_ui()
             if not adb.detect_review_detail_page(detail_xml):
-                print(f"  [商家回复] 本次点击未进入详情页,尝试下一个候选")
+                # 点击未进详情页:可能误点评论图片进入大图浏览页(或点到其他区域)。
+                # 用 ensure_on_review_list 确认是否仍在列表;若已跳到大图页/其他页面,
+                # 恢复回列表后再继续下一候选,避免页面状态污染导致后续点击全部无效。
+                list_ok, detail_xml = ensure_on_review_list(detail_xml)
+                if not list_ok:
+                    print(f"  [商家回复] 点击未进详情页且列表状态丢失,恢复失败")
+                    return False, "", None
+                print(f"  [商家回复] 本次点击未进入详情页,已恢复列表,尝试下一个候选")
                 adb.human_delay(0.5, 1.0)
                 continue
             w, h = adb.get_screen_size()
@@ -400,6 +422,95 @@ def main():
                 print(f"  [商家回复] back()后评论列表状态丢失,恢复失败")
             return True, reply_date, detail_info
         return False, "", None
+
+    def _coord_search_words(text):
+        """从候选文本派生搜索词(全文本→去标签全文→前40字→前20字), 兼容节点文本截断"""
+        prefix_m = re.match(r'^(?:商家回复|.+?[（(]商家[）)]|商家)\s*[:：]\s*', text)
+        full = text[prefix_m.end():] if prefix_m else text
+        words = [text, full, full[:40], full[:20]]
+        # 去重且保留顺序(同一词出现多次只留首个)
+        return list(dict.fromkeys(w for w in words if w))
+
+    def _point_on_image(xml_str, x, y):
+        """(x,y) 是否落在图片/播放节点内(屏幕滚动后候选原坐标可能落到评论图片上, 需拦截)"""
+        try:
+            root = ET.fromstring(xml_str)
+        except Exception:
+            return False
+        for node in root.iter("node"):
+            nt = (node.attrib.get("text", "") + node.attrib.get("content-desc", "")).strip()
+            if "图片" not in nt and "播放" not in nt:
+                continue
+            b = node.attrib.get("bounds", "")
+            coords = b.replace("][", ",").strip("[]").split(",")
+            if len(coords) != 4:
+                continue
+            x1, y1, x2, y2 = map(int, coords)
+            if x1 <= x <= x2 and y1 <= y <= y2:
+                return True
+        return False
+
+    def _coord_still_valid(xml_str, x, y, candidate_text):
+        """
+        修复: 候选坐标有效期校验(多候选滚动场景根因)
+        候选坐标来自候选列表生成时的dump, 但候选循环内任一候选处理都可能滚动列表,
+        后续候选的原始坐标会过期。tap 前校验原坐标:
+          - 落在图片/播放节点上 → 已过期(旧逻辑会误入全屏看图页)
+          - 该处节点未命中同源回复文本 → 该处已被其他内容占据, 已过期
+        :return True=坐标仍有效可直接 tap; False=已过期, 需重定位或跳过
+        """
+        try:
+            root = ET.fromstring(xml_str)
+        except Exception:
+            return False
+        words = _coord_search_words(candidate_text)
+        for node in root.iter("node"):
+            nt = (node.attrib.get("text", "") + node.attrib.get("content-desc", "")).strip()
+            b = node.attrib.get("bounds", "")
+            coords = b.replace("][", ",").strip("[]").split(",")
+            if len(coords) != 4:
+                continue
+            x1, y1, x2, y2 = map(int, coords)
+            if x2 <= x1 or y2 <= y1:
+                continue
+            if not (x1 <= x <= x2 and y1 <= y <= y2):
+                continue
+            if "图片" in nt or "播放" in nt:
+                return False
+            if any(w in nt for w in words):
+                return True
+        return False
+
+    def _fixed_relocate(xml_str, candidate_text, near_y=None):
+        """
+        修复: 候选坐标过期后的重新定位
+        用候选文本在当前dump逐级搜索(全文本→去标签全文→前40字→前20字),
+        过滤: 中心落在图片/播放上、筛选栏tab行内、导航区(10%~90%外)、语音评价。
+        返回第一个有效候选(按 near_y 距离排序); 无有效候选返回 None,
+        调用方应跳过该候选, 不得 tap(旧逻辑此处会 tap 过期坐标误入图片页)。
+        """
+        _, screen_h = adb.get_screen_size()
+        words = _coord_search_words(candidate_text)
+        tab_range = _filter_tab_y_range(xml_str)
+        for st in words:
+            cands = [b for b in adb.find_elements_by_text(xml_str, st)]
+            valid = []
+            for b in cands:
+                cx, cy = b["center"]
+                if "图片" in b["text"] or "播放" in b["text"] or "语音评价" in b["text"]:
+                    continue
+                if _point_on_image(xml_str, cx, cy):
+                    continue
+                if tab_range and tab_range[0] - 5 <= cy <= tab_range[1] + 5:
+                    continue
+                if not (int(screen_h * 0.10) < cy < int(screen_h * 0.90)):
+                    continue
+                valid.append(b)
+            if valid:
+                if near_y is not None:
+                    valid.sort(key=lambda b: abs(b["center"][1] - near_y))
+                return valid[0]
+        return None
 
     def find_reply_candidates(xml, reply_text, y_max, near_y=None):
         """
@@ -599,6 +710,16 @@ def main():
                     adb.human_delay(3.0, 4.0)
                     xml_str = adb.dump_ui()
                     continue
+            # 图片大图浏览页判定:3d步点击商家回复候选时可能误点评论图片进入全屏看图页。
+            # 特征:@用户名节点(如"@segdsh",列表页/详情页用户名均无@前缀) + 无评论筛选栏。
+            # 该页面 detect_review_detail_page 返回 False(无星级卡/无"发条友善评论吧"),
+            # 若不被识别,会被误判"在列表"放行,后续 dump 全是图片页导致空转卡死。
+            if adb.detect_image_viewer_page(xml_str):
+                print(f"  [定位] 误入图片大图浏览页,执行返回恢复")
+                adb.back()
+                adb.human_delay(3.0, 4.0)
+                xml_str = adb.dump_ui()
+                continue
             return True, xml_str
         return False, xml_str
 

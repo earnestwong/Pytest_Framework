@@ -506,6 +506,31 @@ class ADBHelper:
         has_merchant = any("（商家）" in it["text"] or "(商家)" in it["text"] for it in items)
         return has_reply_btn or has_merchant
 
+    def detect_image_viewer_page(self, xml_str: str) -> bool:
+        """
+        检测是否在评论图片大图浏览页(全屏看图)
+        3d步点击商家回复候选时可能误点评论图片进入此页,特征:
+          - "@用户名"节点(如"@segdsh";列表页/详情页用户名均无@前缀,此形态大图页独有)
+          - 图片序号节点(如"1 / 2"/"3/9")
+          - 无评论列表筛选栏(全部/最新/差评/中评)
+        该页面对 detect_review_detail_page 返回 False(无星级卡/无"发条友善评论吧"),
+        若不单独识别会被误判为"在列表"放行,导致后续 dump 全为图片页空转卡死。
+        :return True=在图片大图浏览页(需 back 返回);False=不在
+        """
+        root = ET.fromstring(xml_str)
+        texts = []
+        for node in root.iter("node"):
+            text = (node.attrib.get("text", "") + node.attrib.get("content-desc", "")).strip()
+            if not text:
+                continue
+            texts.append(text)
+        # 反向确认:页面含评论列表筛选栏(任意tab子串)则肯定不是大图页
+        if any(tab in t for t in texts for tab in ("全部", "最新", "差评", "中评")):
+            return False
+        has_at_user = any(t.startswith("@") and len(t) > 1 for t in texts)
+        has_img_seq = any(re.search(r"^\d+\s*/\s*\d+$", t) for t in texts)
+        return has_at_user and has_img_seq
+
     # 商家回复日期格式:8月11日  11:08 / 2025年8月11日  11:08 / 2025-08-11 11:08
     _REPLY_DATE_PAT = re.compile(
         r'(\d{4}年\d{1,2}月\d{1,2}日|\d{1,2}月\d{1,2}日|\d{4}[-/.]\d{1,2}[-/.]\d{1,2})'
