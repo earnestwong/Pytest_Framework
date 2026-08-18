@@ -415,7 +415,9 @@ class ADBHelper:
         "超预期", "很棒", "还可以",
     }
     # 店铺星级卡片特征:"· 3.8 星" / "3.8 星" / "3.8星"(详情页底部店铺卡片独有)
-    _SHOP_STAR_PAT = re.compile(r'·?\s*\d+(?:\.\d+)?\s*星')
+    # 用锚定/带"·"的形式匹配,避免列表页评论文本里的"2星半/3星/半颗星"被误判为详情页。
+    # 详情页店铺星级节点文本形如"· 3.7 星"(带前缀圆点"·",列表页无此形态)。
+    _SHOP_STAR_PAT = re.compile(r'·\s*\d+(?:\.\d+)?\s*星')
 
     # 详情页回复日期节点的完整形态(独立节点,如"8月11日 11:08"/"2025年8月11日 11:08")
     # 用锚定匹配:仅当整个文本就是"日期+时间"才算详情页特征,
@@ -466,8 +468,11 @@ class ADBHelper:
                         top_texts.append(text)
                 except ValueError:
                     pass
-        # 反向排除:列表筛选栏组合命中 >=3 个 -> 确认在评论列表页,非详情页
-        if sum(1 for t in texts if t in self._LIST_FILTER_TABS) >= 3:
+        # 反向排除:评论列表筛选栏(全部/最新/差评/中评)组合命中 >=2 个 -> 确认在评论列表页,非详情页
+        # 用子串匹配:uiautomator 的 text+content-desc 常被拼接成"差评差评"/"中评中评"重复串,
+        # 精确匹配(t in LIST_TABS)会失败导致反排失效,从而把列表页误判为详情页后 back() 退出列表。
+        tab_hits = sum(1 for t in texts if any(tab in t for tab in self._LIST_FILTER_TABS))
+        if tab_hits >= 2:
             return False
         # 详情页特征判断(任一命中即判定)
         if any(self._SHOP_STAR_PAT.search(t) for t in texts):

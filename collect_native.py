@@ -122,6 +122,10 @@ def main():
     )
     print(f"CSV 文件: {csv_path}(增量写入)")
 
+    # JSON 增量写入:与 CSV 同名不同后缀,每屏结束时用 save_to 固定覆盖,
+    # 这样即使 Ctrl+C 强制中断/列表丢失提前退出,json 也已保留已采集数据,不丢结果。
+    json_path = os.path.splitext(csv_path)[0] + ".json"
+
     def _filter_tab_y_range(xml_str):
         """检测评论列表筛选栏 tab 行的 y 区间(全部/最新/差评/中评/带图/视频/筛选)。
         筛选栏吸顶固定在屏幕顶部,点击该区间的候选会被筛选 tab 拦截(误切"中评"等)。
@@ -598,10 +602,13 @@ def main():
             return True, xml_str
         return False, xml_str
 
-    # 无限模式:通过识别"已折叠部分评价"文本判定到底;固定模式:按 args.scroll 滑
-    FOLD_HINT = "已折叠部分评价"  # 评论列表到底时点评显示的提示文本
+    # 无限模式:通过识别"已折叠部分评价"/"看完啦"等文本判定到底;固定模式:按 args.scroll 滑
+    FOLD_HINT = "已折叠部分评价"  # 评分列表到底时点评显示的提示文本
+    # 到底提示文本集合:任一出现即认为评论列表已到底(评论区常有时"看完啦"提示)
+    END_HINTS = (FOLD_HINT, "看完啦")
     screen_idx = 0
     no_neg_screen_count = 0  # 连续"屏内无差评卡片"计数(>=2 才判定真跳出,防单屏偶发误判)
+    stall_count = 0  # 连续"无新增且无有效卡片"屏数(列表丢失/卡死兜底,>=3 则结束采集)
     while True:
         # 固定模式:达到屏数上限则停
         if not infinite and screen_idx >= args.scroll:
@@ -612,9 +619,10 @@ def main():
         # 1. dump 当前屏(复用于:到底检测 + 验证码检测 + 全文按钮定位)
         xml_str = adb.dump_ui()
 
-        # 1a. 到底检测:评论列表底部出现"依据平台规则,已折叠部分评价"
-        if FOLD_HINT in xml_str:
-            print(f"  [到底] 识别到'{FOLD_HINT}'提示,评论列表已到底")
+        # 1a. 到底检测:评论列表底部出现"已折叠部分评价"/"看完啦"等提示
+        if any(h in xml_str for h in END_HINTS):
+            hit = next(h for h in END_HINTS if h in xml_str)
+            print(f"  [到底] 识别到'{hit}'提示,评论列表已到底")
             break
 
         # 1b. 详情页检测:滑动后可能误进评论详情页(网络卡顿/列表项误触)
@@ -631,8 +639,9 @@ def main():
                 adb.human_delay(2.0, 3.0)
                 # 返回后重新 dump 作为后续操作的基准
                 xml_str = adb.dump_ui()
-                if FOLD_HINT in xml_str:
-                    print(f"  [到底] 返回后识别到'{FOLD_HINT}'提示,评论列表已到底")
+                if any(h in xml_str for h in END_HINTS):
+                    hit = next(h for h in END_HINTS if h in xml_str)
+                    print(f"  [到底] 返回后识别到'{hit}'提示,评论列表已到底")
                     break
 
         # 1b. 滑动验证码检测(反扒随机弹出,复用本次 dump 不额外消耗)
@@ -819,10 +828,16 @@ def main():
                 fp = _reply_fingerprint(content)
                 if not fp:
                     continue
-                # 该回复已归属到任意卡片则跳过(防跨屏残留被误补到别的卡片)
-                if any(_reply_same(fp, _reply_fingerprint(c.get("merchant_reply") or ""))
-                       for c in summarizer.cards):
-                    print(f"  [商家回复] 该孤立回复已补全到评论,跳过")
+                # 该回复已归属到某卡片:若该卡片已有回复日期则跳过(防跨屏残留被误补);
+                # 若仅回复内容、日期仍为空(如上一屏3d步点详情页失败未取到日期),
+                # 本次跨屏拿到的日期需补全,不能因"已有内容"就跳过丢日期。
+                fp_card = None
+                for c in summarizer.cards:
+                    if _reply_same(fp, _reply_fingerprint(c.get("merchant_reply") or "")):
+                        fp_card = c
+                        break
+                if fp_card is not None and (fp_card.get("merchant_reply_date") or "").strip():
+                    print(f"  [商家回复] 该孤立回复已补全到评论且已有日期,跳过")
                     continue
                 # 精确定位:优先用解析器记录的回复节点坐标(避免模糊匹配误点其他回复)
                 candidates = []
@@ -843,6 +858,14 @@ def main():
                     continue
                 if not reply_date:
                     print(f"  [商家回复] 孤立回复已进入详情页,但未找到回复日期")
+                    continue
+                # 若该回复内容已归属到某卡片(前面指纹匹配到的 fp_card)但缺日期:
+                # 直接把日期补到该卡片,不进 target 搜索/跨屏拼回(那些会因
+                # "卡片已有回复内容"或"用户+日期已存在"而跳过,导致已拿到的日期丢失)。
+                if fp_card is not None and not (fp_card.get("merchant_reply_date") or "").strip():
+                    fp_card["merchant_reply_date"] = reply_date
+                    print(f"  [商家回复] 已为既有卡片补全回复日期: {reply_date} -> [{fp_card.get('user') or '?'}] {fp_card.get('date')}")
+                    csv_exporter.rewrite_all(summarizer.cards)
                     continue
                 # 补到上一屏最后一条还没有商家回复的卡片(孤立回复必定紧跟该卡片内容)
                 # 匿名用户同名场景:倒序遍历最近N条无回复卡片,用复合身份匹配定位正确归属
@@ -1143,8 +1166,20 @@ def main():
         after = len(summarizer.cards)
         new_count = after - before
         print(f"  [评价] 本屏 {len(valid_cards)} 条,新增 {new_count} 条" + (f"(跳过{skipped}条空用户名)" if skipped else ""))
-        # 每屏结束用 summarizer.cards 重写 CSV(确保3a/3c补全的回复日期写入,中断不丢数据)
+        # 空转兜底:连续多屏"无新增且无有效卡片"(本屏没解析到任何有内容的评论),
+        # 判定已列表丢失/滚到底/卡死在非列表页,提前结束采集(结果已由下方 rewrite 保留)
+        has_val = any(c.get("content") or c.get("merchant_reply") for c in valid_cards)
+        if new_count == 0 and not has_val:
+            stall_count += 1
+            print(f"  [兜底] 本屏无新增且无有效卡片,连续 {stall_count}/3 屏空转")
+            if stall_count >= 3:
+                print(f"  [兜底] 连续3屏无进展,判定列表丢失/已到底,结束采集(结果已保存)")
+                break
+        else:
+            stall_count = 0
         csv_exporter.rewrite_all(summarizer.cards)
+        # JSON 同步增量写入固定路径(与 CSV 一致,提前退出/中断也不丢结果)
+        summarizer.save_to(json_path)
         for card in valid_cards:
             price_tag = f" 人均¥{card['avg_price']}" if card.get("avg_price") else ""
             print(f"    [{card['user']}] {card['date']} {card['score']}{price_tag}")
@@ -1177,8 +1212,8 @@ def main():
     csv_exporter.close()
     print(f"CSV 报告: {csv_path}(已更新含回复日期补全)")
 
-    # JSON 报告
-    json_path = summarizer.save(shop_name=args.shop, output_dir=args.output_dir)
+    # JSON 报告(固定路径,与增量写入同一文件)
+    summarizer.save_to(json_path)
     print(f"JSON 报告: {json_path}")
 
     print("\n采集完成")

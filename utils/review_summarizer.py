@@ -68,10 +68,19 @@ class ReviewSummarizer:
         }
 
     def save(self, output_dir: str = "reports/dianping", shop_name: str = "shop") -> str:
-        """保存汇总结果为 JSON 文件"""
+        """保存汇总结果为 JSON 文件(生成带时间戳的新文件)"""
         os.makedirs(output_dir, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         path = os.path.join(output_dir, f"{shop_name}_reviews_{ts}.json")
+        return self.save_to(path)
+
+    def save_to(self, path: str) -> str:
+        """
+        保存汇总结果为 JSON 到指定固定路径(增量写入复用同一文件)
+        与 save 的区别:save 每次都生成新时间戳文件名;save_to 固定覆盖指定 path,
+        供采集过程中每屏结束时重写,即使 Ctrl+C/中断/列表丢失退出也不丢已采集数据。
+        """
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(self.to_dict(), f, ensure_ascii=False, indent=2)
         return path
