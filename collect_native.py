@@ -173,6 +173,7 @@ def main():
         :return (是否进入详情页, 回复日期, 详情页评论者信息dict)
                  dict = {'user': ..., 'date': ..., 'content_prefix': ...};未进入详情页返回 None
         """
+        clicked = set()  # 已点击过的回复位置,防同模板回复重定位撞车后重复点击
         for btn in candidates:
             x, y = btn["center"]
             # 修复: 候选坐标有效期校验(多候选滚动场景根因)
@@ -180,16 +181,22 @@ def main():
             # (tab行重定位滚动/导航区滚动/详情页back往返)。此时后续候选的原始坐标已过期
             # ——旧逻辑直接 tap 会把过期坐标点到大钱9图评论的图片上, 误入全屏看图页。
             # tap 前用最新 dump 校验: 原坐标处必须仍命中同源回复文本且不在图片/播放上;
-            # 过期则用候选文本在当前屏重定位(过滤图片/播放、tab行、导航区、语音评价),
+            # 过期则用候选文本在当前屏重定位, 锚定该候选的原坐标(near_y=btn 原位置,
+            # 使不同候选重定位到各自原来的回复, 避免同屏多条同模板回复全部撞到同一条);
             # 重定位失败则跳过该候选, 绝不使用过期坐标 tap。
             cur_xml = adb.dump_ui()
             if not _coord_still_valid(cur_xml, x, y, btn["text"]):
-                reloc = _fixed_relocate(cur_xml, btn["text"], near_y=near_y)
+                reloc = _fixed_relocate(cur_xml, btn["text"], near_y=btn["center"][1])
                 if reloc is None:
                     print(f"  [商家回复] 候选@({x},{y})坐标已过期且无法在当前屏重定位,跳过")
                     continue
                 x, y = reloc["center"]
                 print(f"  [商家回复] 候选坐标过期,重定位 @ ({x}, {y}) text=[{btn['text'][:15]}]")
+            # 去重: 同一位置(已因身份不符失败过)不重复点击
+            if (x, y) in clicked:
+                print(f"  [商家回复] 位置({x},{y})已尝试过且身份不符,跳过")
+                continue
+            clicked.add((x, y))
             # 候选落在屏幕顶部/底部导航区时点击无效(点评底部Tab/顶部状态栏拦截):
             # 该回复可能只露出屏幕边缘一条,中心点在导航栏上,直接 tap 会被拦截。
             # 先小幅滚动把回复露到可点击区,再重新定位点击。
@@ -542,15 +549,17 @@ def main():
         #    顶部(y<16%)或底部(y>90%),此时严格 y_min/y_max 过滤会把该回复排除,
         #    导致精确匹配0候选,回退模糊匹配时误点到同屏其他评论的回复。
         #    精确匹配用的搜索词是回复全文(或前40字,如"我们非常重视您的意见"),
-        #    导航/搜索/底部操作栏都不会出现该文本,故 y 范围放宽到 3%~98%
-        #    (仅排除状态栏与底部导航),允许跨屏残留的回复命中。
+        #    导航/搜索/底部操作栏都不会出现该文本,故 y 范围放宽到 3%~99.5%
+        #    (仅排除状态栏,保留屏底被裁剪回复),允许跨屏残留的回复命中。
+        #    屏底只露一两条的回复中心虽在导航区,get_reply_date_from_detail 会先
+        #    滚动露出再重定位点击,不会直接点导航栏。
         if prefix_m:
             full_content = reply_text[prefix_m.end():]
             search_texts = [full_content]
             if len(full_content) > 40:
                 search_texts.append(full_content[:40])
             y_lo = int(screen_h * 0.03)
-            y_hi = int(screen_h * 0.98)
+            y_hi = int(screen_h * 0.995)
             candidates = []
             for st in search_texts:
                 cands = [b for b in adb.find_elements_by_text(xml, st)
