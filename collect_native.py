@@ -29,6 +29,7 @@ from utils.adb_helper import ADBHelper
 from utils.review_parser import ReviewParser
 from utils.review_summarizer import ReviewSummarizer
 from utils.csv_exporter import CSVExporter
+from utils.db_sync import ReviewDBSync
 
 # 配置文件路径(与本脚本同目录)
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dianping_config.json")
@@ -45,6 +46,7 @@ def load_config() -> dict:
         "ratio": 0.38,
         "output_dir": "reports/dianping",
         "captcha_screenshot_dir": "screenshots/captcha",
+        "db": {},
     }
     if os.path.exists(CONFIG_PATH):
         try:
@@ -75,6 +77,8 @@ def parse_args():
                    help="滑动方式:auto(根据设备自动) | swipe(真机) | roll(MuMu)")
     p.add_argument("--output-dir", default=cfg["output_dir"],
                    help="CSV/JSON 报告输出目录")
+    p.add_argument("--no-db", action="store_true",
+                   help="不同步数据库(仅输出 CSV/JSON)")
     return p.parse_args()
 
 
@@ -121,6 +125,18 @@ def main():
         output_dir=args.output_dir,
     )
     print(f"CSV 文件: {csv_path}(增量写入)")
+
+    # 数据库同步:按 hash_value 去重插入 store_reviews_negative;
+    # 数据库不可用(如外网跑脚本)时自动禁用,仅输出 CSV/JSON
+    cfg = load_config()
+    db_sync = None if args.no_db else ReviewDBSync(cfg.get("db") or {})
+    if db_sync is None:
+        print("[DB] 同步已禁用(--no-db),仅输出 CSV/JSON")
+    elif db_sync.is_available():
+        print(f"[DB] 连接成功: {db_sync.cfg.get('host')}:{db_sync.cfg.get('port')}"
+              f"/{db_sync.cfg.get('database')}({db_sync.cfg.get('table')})")
+    else:
+        print("[DB] 连接不可用(外网?),本次仅输出 CSV/JSON")
 
     # JSON 增量写入:与 CSV 同名不同后缀,每屏结束时用 save_to 固定覆盖,
     # 这样即使 Ctrl+C 强制中断/列表丢失提前退出,json 也已保留已采集数据,不丢结果。
@@ -1311,6 +1327,9 @@ def main():
         result = {"cards": valid_cards, "review_count": len(valid_cards), "source": "native"}
         summarizer.add(result)
         after = len(summarizer.cards)
+        # hash_value 唯一标识(日期归一化,与 CSV/DB 公式一致),写入 JSON 报告
+        for c in summarizer.cards:
+            c["hash_value"] = CSVExporter.card_hash(args.org_code, c)
         new_count = after - before
         print(f"  [评价] 本屏 {len(valid_cards)} 条,新增 {new_count} 条" + (f"(跳过{skipped}条空用户名)" if skipped else ""))
         # 空转兜底:连续多屏"无新增且无有效卡片"(本屏没解析到任何有内容的评论),
@@ -1325,6 +1344,9 @@ def main():
         else:
             stall_count = 0
         csv_exporter.rewrite_all(summarizer.cards)
+        # 同步数据库(hash_value 去重;DB 不可用时跳过,不影响 CSV/JSON)
+        if db_sync is not None:
+            db_sync.sync_cards(summarizer.cards, org_code=args.org_code, shop_name=args.shop)
         # JSON 同步增量写入固定路径(与 CSV 一致,提前退出/中断也不丢结果)
         summarizer.save_to(json_path)
         for card in valid_cards:
@@ -1363,6 +1385,9 @@ def main():
     summarizer.save_to(json_path)
     print(f"JSON 报告: {json_path}")
 
+    # 最终同步数据库(覆盖最后一屏的补全字段)
+    if db_sync is not None:
+        db_sync.sync_cards(summarizer.cards, org_code=args.org_code, shop_name=args.shop)
     print("\n采集完成")
 
 
