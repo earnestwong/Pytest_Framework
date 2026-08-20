@@ -7,6 +7,7 @@ CSV 导出模块:把采集到的评价卡片写入 CSV 文件
 import csv
 import os
 import re
+import hashlib
 from datetime import datetime, timedelta
 from typing import List, Dict
 
@@ -26,6 +27,7 @@ class CSVExporter:
         "sentiment",           # 情感(根据 rating 映射:positive/neutral/negative)
         "store_feedback",      # 商家回复
         "store_feedback_date", # 商家回复日期(YYYY-MM-DD)
+        "hash_value",          # 记录唯一标识 MD5(org_code|username|review_date|content)
     ]
 
     # rating 文案 -> sentiment 映射(按大众点评常见评分文案)
@@ -33,9 +35,33 @@ class CSVExporter:
     NEUTRAL_KEYWORDS = ("还可以", "一般")
     NEGATIVE_KEYWORDS = ("较差", "很糟糕")
 
-    # 相对时间换算:刚刚/N小时前/N天前/昨天/前天
-    _REL_PAT = re.compile(r"^(\d+)\s*(小时|天)前$")
+    # 相对时间换算:刚刚/N分钟前/N小时前/N天前/昨天/前天
+    _REL_PAT = re.compile(r"^(\d+)\s*(分钟|小时|天)前$")
     _NOW_PAT = re.compile(r"^(刚刚|刚刚前)$")
+
+    @staticmethod
+    def hash_value(org_code: str, username: str, review_date: str, content: str) -> str:
+        """
+        记录唯一标识:MD5(CONCAT(org_code, '|', username, '|', review_date, '|', content))
+        小写 hex,utf-8 编码,与 MySQL store_reviews_negative.hash_value 同公式
+        """
+        s = "{}|{}|{}|{}".format(
+            (org_code or "").strip(),
+            (username or "").strip(),
+            (review_date or "").strip(),
+            (content or "").strip(),
+        )
+        return hashlib.md5(s.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def card_hash(cls, org_code: str, card: Dict) -> str:
+        """计算卡片 hash(日期归一化后,与 CSV 行值一致)"""
+        return cls.hash_value(
+            org_code,
+            card.get("user", ""),
+            cls._normalize_date(card.get("date", "") or ""),
+            card.get("content", "") or "",
+        )
 
     @classmethod
     def _rating_to_sentiment(cls, rating: str) -> str:
@@ -75,7 +101,12 @@ class CSVExporter:
         if m:
             n = int(m.group(1))
             unit = m.group(2)
-            delta = timedelta(hours=n) if unit == "小时" else timedelta(days=n)
+            if unit == "分钟":
+                delta = timedelta(minutes=n)
+            elif unit == "小时":
+                delta = timedelta(hours=n)
+            else:
+                delta = timedelta(days=n)
             return (datetime.now() - delta).strftime("%Y-%m-%d")
         if s == "昨天":
             return (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -127,6 +158,7 @@ class CSVExporter:
             self._rating_to_sentiment(card.get("score", "")),
             card.get("merchant_reply", ""),
             self._normalize_date(card.get("merchant_reply_date", "")),
+            self.card_hash(org_code, card),
         ]
 
     def open_incremental(

@@ -10,6 +10,9 @@ __pycache__/
 screenshots/
 reports/
 
+# 本机配置(含数据库密码等敏感信息,不入库)
+dianping_config.json
+
 # IDE
 .idea/
 .vscode/
@@ -17,3 +20,13 @@ reports/
 # 系统
 .DS_Store
 Thumbs.db
+
+# 临时调试脚本与运行日志(不提交)
+_diag*.py
+_test*.py
+_enter_review_list.py
+_retry_dump.py
+_scroll_to_tracy.py
+*.log
+*_pad_dump*.xml
+*-最新一次试跑*.txt

@@ -3,6 +3,7 @@
 原生文本通道和 OCR 通道共用此模块
 """
 import os
+import re
 import json
 from typing import List, Dict
 from datetime import datetime
@@ -47,10 +48,15 @@ class ReviewSummarizer:
 
     @staticmethod
     def _dedup_key(card: Dict) -> str:
-        """去重 key:用户名 + 日期 + 内容前20字符"""
+        """去重 key:用户名 + 日期 + 内容前20字符(忽略评分前缀)"""
         user = (card.get("user") or "").strip()
         date = (card.get("date") or "").strip()
-        content = (card.get("content") or "").strip()[:20]
+        content = (card.get("content") or "").strip()
+        # 同一评论在列表页解析时 content 以"口味:1.5\n环境:1.5\n服务:1.5\n"
+        # 评分前缀开头,而孤立回复跨屏拼回时 content 无此前缀,导致 content[:20]
+        # 不同而无法去重。剥离开头连续的多行评分前缀后再取前20字,归一化一致。
+        content = re.sub(r'^(?:(?:口味|环境|服务|性价比):\s*[\d.]+\s*\n?)+', '', content)
+        content = content[:20]
         return f"{user}|{date}|{content}"
 
     def to_dict(self) -> Dict:
@@ -62,10 +68,19 @@ class ReviewSummarizer:
         }
 
     def save(self, output_dir: str = "reports/dianping", shop_name: str = "shop") -> str:
-        """保存汇总结果为 JSON 文件"""
+        """保存汇总结果为 JSON 文件(生成带时间戳的新文件)"""
         os.makedirs(output_dir, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         path = os.path.join(output_dir, f"{shop_name}_reviews_{ts}.json")
+        return self.save_to(path)
+
+    def save_to(self, path: str) -> str:
+        """
+        保存汇总结果为 JSON 到指定固定路径(增量写入复用同一文件)
+        与 save 的区别:save 每次都生成新时间戳文件名;save_to 固定覆盖指定 path,
+        供采集过程中每屏结束时重写,即使 Ctrl+C/中断/列表丢失退出也不丢已采集数据。
+        """
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(self.to_dict(), f, ensure_ascii=False, indent=2)
         return path
