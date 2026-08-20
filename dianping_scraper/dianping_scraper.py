@@ -51,7 +51,9 @@ EXIT_PARTIAL = 4
 
 WHEEL_DELTA = 120
 IS_WINDOWS = os.name == "nt"
-REVIEW_API_KEYWORD = "outsidesiftedreviewlist"
+REVIEW_API_KEYWORD = "reviewlist"   # matches outsidesiftedreviewlist / outsideshopreviewlist / ...
+REPLY_API_KEYWORD = "paginateDpFeedReply"
+MERCHANT_USER_TYPE = 10
 DP_HOSTS = ("dianping.com", "dpfile.com", "meituan.com")
 
 # ---------------------------------------------------------------------------
@@ -390,19 +392,26 @@ def count_reviews(capture_file, prog):
             data = json.loads(body)
         except Exception:
             continue
-        reviews = data.get("list") or data.get("result", {}).get("reviewList", []) or []
-        for item in reviews:
+        if not isinstance(data, dict):
+            continue
+        r = data.get("result")
+        r = r if isinstance(r, dict) else {}
+        for item in (data.get("list") or r.get("reviewList") or []):
             if not isinstance(item, dict):
                 continue
             mid = str(item.get("mainId", ""))
             if mid:
                 prog["mids"].add(mid)
-        si = data.get("startIndex") or data.get("result", {}).get("startIndex", 0)
+        si = data.get("startIndex")
+        if si is None:
+            si = r.get("startIndex", 0)
         if isinstance(si, int) and si > prog["max_start"]:
             prog["max_start"] = si
-        if data.get("isEnd") is True:
+        if data.get("isEnd") is True or r.get("isEnd") is True:
             prog["is_end"] = True
         src = data.get("shopReviewCount")
+        if src is None:
+            src = r.get("shopReviewCount")
         if isinstance(src, int) and src > (prog["shop_review_count"] or 0):
             prog["shop_review_count"] = src
     return len(prog["mids"]), prog["max_start"]
@@ -721,10 +730,115 @@ def parse_price(p):
     return nums[0] if nums else ""
 
 
+def walk_rich_text(node):
+    """Flatten dianping rich-text JSON ({node,children:[{type:'text',text},...]}) to plain text."""
+    if isinstance(node, dict):
+        if node.get("type") == "text" and node.get("text"):
+            return str(node["text"])
+        return "".join(walk_rich_text(c) for c in (node.get("children") or []))
+    if isinstance(node, list):
+        return "".join(walk_rich_text(c) for c in node)
+    if isinstance(node, str):
+        return node
+    return ""
+
+
+def reply_plain_text(content):
+    """Reply content may be a plain string or rich-text JSON string."""
+    if isinstance(content, str) and content.strip().startswith("{"):
+        try:
+            return walk_rich_text(json.loads(content)).strip()
+        except Exception:
+            return content.strip()
+    if isinstance(content, (dict, list)):
+        return walk_rich_text(content).strip()
+    return (content or "").strip() if isinstance(content, str) else ""
+
+
+def normalize_reply_date(t):
+    """replyTime samples: '2026-8-17' -> '2026-08-17'; pass through anything else."""
+    if not t:
+        return ""
+    m = re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})", str(t))
+    if m:
+        return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+    return str(t)
+
+
+def collect_reply_api_replies(fh, reply_map):
+    """Parse paginateDpFeedReply responses.
+
+    The response entry's URL carries the request's `mainId` query param, which
+    links the reply page to its review. reply_map: mainId -> {replyKey: dict}."""
+    n = 0
+    for line in fh:
+        try:
+            e = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(e, dict) or e.get("type") != "response":
+            continue
+        if REPLY_API_KEYWORD not in e.get("url", ""):
+            continue
+        m = re.search(r"[?&]mainId=(\d+)", e.get("url", ""))
+        if not m:
+            continue
+        mid = m.group(1)
+        body = e.get("body") or ""
+        if not body:
+            continue
+        try:
+            data = json.loads(body)
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        r = data.get("result")
+        if not isinstance(r, dict):
+            continue
+        recs = r.get("records") or []
+        bucket = reply_map.setdefault(mid, {})
+        for rec in recs:
+            if not isinstance(rec, dict):
+                continue
+            fu = rec.get("fromUser") or {}
+            text = reply_plain_text(rec.get("content"))
+            if not text:
+                continue
+            key = str(rec.get("feedReplyIdL") or rec.get("feedReplyId")
+                      or f"{fu.get('userName')}|{text[:50]}")
+            if key in bucket:
+                continue
+            bucket[key] = {
+                "user_type": fu.get("userType"),
+                "user_name": fu.get("userName") or "",
+                "time": normalize_reply_date(rec.get("replyTime")),
+                "text": text,
+            }
+            n += 1
+    return n
+
+
 def extract_reviews_from_jsonl(capture_file, org_code, store_name, rating_scale):
-    """Dedupe by mainId. rating_scale: 'raw' -> 0..50 as-is (matches DB import),
-    'ten' -> star/10 with one decimal (0.0..5.0)."""
+    """Parse capture file into review rows.
+
+    Handles BOTH review-list response formats (tab-dependent, not store-dependent):
+      - data.list            -> "最新" (latest) tab, e.g. outsidesiftedreviewlist.bin
+      - data.result.reviewList -> "全部" (all) tab
+    Merchant replies are merged from two sources:
+      - comments[] embedded in list responses (PRIMARY source, full content,
+        but no reply time) -- obtained by simply scrolling the list
+      - paginateDpFeedReply responses (same content, adds replyTime) -- only
+        captured if the operator clicks into review detail pages
+    Returns (rows, stats). Dedupe by mainId."""
+
+    reply_map = {}
+    with open(capture_file, "r", encoding="utf-8", errors="ignore") as fh:
+        reply_total = collect_reply_api_replies(fh, reply_map)
+    reply_map = {mid: b for mid, b in reply_map.items() if b}
+
     reviews = {}
+    embedded_merchant = 0
     with open(capture_file, "r", encoding="utf-8", errors="ignore") as fh:
         for line in fh:
             try:
@@ -742,7 +856,11 @@ def extract_reviews_from_jsonl(capture_file, org_code, store_name, rating_scale)
                 data = json.loads(body)
             except Exception:
                 continue
-            lst = data.get("list") or data.get("result", {}).get("reviewList", []) or []
+            if not isinstance(data, dict):
+                continue
+            r = data.get("result")
+            r = r if isinstance(r, dict) else {}
+            lst = data.get("list") or r.get("reviewList", []) or []
             for item in lst:
                 if not isinstance(item, dict):
                     continue
@@ -764,15 +882,31 @@ def extract_reviews_from_jsonl(capture_file, org_code, store_name, rating_scale)
                     rating_val = str(int(star_num)) if star_num == int(star_num) else str(star_num)
                 dt = parse_review_time(item.get("time") or "")
                 feedback_parts = []
+                seen_texts = set()
+                # source 1: reply API version (same content as embedded, adds time)
+                for rr in (reply_map.get(mid) or {}).values():
+                    if rr["user_type"] != MERCHANT_USER_TYPE or not rr["text"]:
+                        continue
+                    if rr["text"] in seen_texts:
+                        continue
+                    seen_texts.add(rr["text"])
+                    name = rr["user_name"] or "商家回应"
+                    head = f"[{name} {rr['time']}]" if rr["time"] else f"[{name}]"
+                    feedback_parts.append(f"{head}{rr['text']}")
+                # source 2: replies embedded in the list response (primary source)
                 for c in (item.get("comments") or []):
                     if not isinstance(c, dict):
                         continue
                     cfu = c.get("fromUser") or {}
-                    if cfu.get("userType") == 10:
-                        ctext = c.get("content") or ""
-                        uname = cfu.get("userName") or ""
-                        if ctext:
-                            feedback_parts.append(f"[{uname}]{ctext}" if uname else ctext)
+                    if cfu.get("userType") != MERCHANT_USER_TYPE:
+                        continue
+                    ctext = reply_plain_text(c.get("content"))
+                    if not ctext or ctext in seen_texts:
+                        continue
+                    seen_texts.add(ctext)
+                    embedded_merchant += 1
+                    uname = cfu.get("userName") or "商家回应"
+                    feedback_parts.append(f"[{uname}]{ctext}")
                 reviews[mid] = {
                     "org_code": org_code,
                     "store_name": store_name,
@@ -785,7 +919,15 @@ def extract_reviews_from_jsonl(capture_file, org_code, store_name, rating_scale)
                     "sentiment": classify_sentiment(star10),
                     "store_feedback": "\n".join(feedback_parts),
                 }
-    return list(reviews.values())
+    merchant_from_api = sum(
+        1 for b in reply_map.values() for r in b.values()
+        if r["user_type"] == MERCHANT_USER_TYPE)
+    stats = {
+        "merchant_replies_from_reply_api": merchant_from_api,
+        "merchant_replies_embedded_extra": embedded_merchant,
+        "reply_api_mainIds": len(reply_map),
+    }
+    return list(reviews.values()), stats
 
 
 def cmd_export(args):
@@ -796,8 +938,8 @@ def cmd_export(args):
         emit_result({"status": "error", "error": f"capture file not found: {capture_file}"})
         return EXIT_ERROR
 
-    items = extract_reviews_from_jsonl(capture_file, args.org_code, args.store_name,
-                                       args.rating_scale)
+    items, reply_stats = extract_reviews_from_jsonl(capture_file, args.org_code,
+                                                    args.store_name, args.rating_scale)
     items.sort(key=lambda x: (x["review_date"] == "", x["review_date"] or "9999"),
                reverse=True)
 
@@ -820,16 +962,28 @@ def cmd_export(args):
             w.writerows(items)
 
     dist = {}
+    with_feedback = 0
     for it in items:
         dist[it["sentiment"]] = dist.get(it["sentiment"], 0) + 1
+        if it["store_feedback"]:
+            with_feedback += 1
     result = {"status": "ok", "rows": len(items), "output": os.path.abspath(out),
-              "format": args.format, "sentiment": dist, "source": os.path.abspath(capture_file)}
+              "format": args.format, "sentiment": dist, "source": os.path.abspath(capture_file),
+              "reviews_with_replies": with_feedback,
+              "reply_stats": reply_stats}
+    if with_feedback == 0 and len(items) > 0:
+        result["warning"] = ("no merchant replies found in any review -- replies come "
+                             "from the review list itself (comments[]), so verify the "
+                             "store actually has 商家回复 on the dianping page")
     if _JSON_MODE:
         emit_result(result)
     else:
         log(f"exported {len(items)} reviews -> {out}")
         for k in ("好评", "中评", "差评"):
             log(f"  {k}: {dist.get(k, 0)}")
+        log(f"  reviews with merchant replies: {with_feedback}")
+        log(f"  replies from reply API: {reply_stats['merchant_replies_from_reply_api']}, "
+            f"embedded extras: {reply_stats['merchant_replies_embedded_extra']}")
         emit_result(result)
     return EXIT_OK
 
@@ -884,8 +1038,8 @@ def build_parser():
     sp.add_argument("--format", choices=["csv", "json"], default="csv", help="output format (default csv)")
     sp.add_argument("--encoding", default="utf-8-sig",
                     help="csv encoding: utf-8-sig (Excel-friendly, default), utf-8, gbk")
-    sp.add_argument("--rating-scale", choices=["raw", "ten"], default="raw",
-                    help="raw: keep 0..50 star as-is (matches DB); ten: convert to 0.0..5.0")
+    sp.add_argument("--rating-scale", choices=["raw", "ten"], default="ten",
+                    help="ten: convert to 0.0..5.0 stars (default, matches DB); raw: keep 0..50 as-is")
     add_common(sp)
     return p
 

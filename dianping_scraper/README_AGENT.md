@@ -87,22 +87,45 @@ dianping_scraper.exe export <store_id> --org-code <code> --store-name <name> [op
 | `--output` | 自动 | 输出路径，默认 `{store_id}_reviews.{csv|json}` |
 | `--format` | csv | `csv` 或 `json` |
 | `--encoding` | utf-8-sig | CSV 编码，可选 `utf-8` / `gbk` |
-| `--rating-scale` | raw | `raw`=原始 0..50 星值（与 store_reviews 表一致）；`ten`=换算 0.0..5.0 |
+| `--rating-scale` | ten | `ten`=换算 0.0..5.0 星级（默认，与 store_reviews 表一致）；`raw`=原始 0..50 星值 |
 
 **输出列**（与 MySQL `store_reviews` 表字段对齐）：
 `org_code, store_name, username, review_date, rating, price_per_person, content, sentiment, store_feedback`
 
 - `review_date`：相对时间（"3天前"等）已转为 `YYYY-MM-DD`
 - `sentiment`：好评(≥4.0) / 中评(≥3.0) / 差评，基于 5 分制
-- `store_feedback`：商家回复（userType==10），多条以换行连接，格式 `[商家名]内容`
-- 返回 JSON 含：`rows`、`output`（绝对路径）、`sentiment` 分布
+- `store_feedback`：商家回复（userType==10），多条以换行连接。来自回复接口的带时间：`[商家回应 2026-08-14]内容`；仅列表内嵌的：`[商家名]内容`
+- 返回 JSON 含：`rows`、`output`（绝对路径）、`sentiment` 分布、`reviews_with_replies`、`reply_stats`（`merchant_replies_from_reply_api` / `merchant_replies_embedded_extra` / `reply_api_mainIds`）。**若 `reviews_with_replies=0` 会附带 `warning` 字段**——如该店实际有商家回复，说明抓取时没点开过评论详情页，完整回复未被记录。
+
+**export 成功后必做**：将返回 JSON 中 `output` 指向的 CSV 文件（computer:// 链接形式）随结果摘要一起发给用户，不要只报告统计数字。
+
+## 评论列表接口（两种 tab 格式，均已适配）
+
+小程序评论页有两个 tab，对应**两种不同的响应结构**（与门店无关）：
+
+| tab | 响应格式 | 典型 URL |
+|-----|---------|---------|
+| 全部 | `data.result.reviewList` | reviewlist 系接口 |
+| 最新 | `data.list`（顶层含 `isEnd`/`startIndex`/`shopReviewCount`） | `outsidesiftedreviewlist.bin` |
+
+capture/export 的接口匹配关键字是 `reviewlist`（同时命中 `outsidesiftedreviewlist` / `outsideshopreviewlist` 等），两种结构都会解析，任一 tab 滚动都能抓到。isEnd 检测兼容顶层与 `result` 内两种位置。
+
+## 商家回复来源（重要：主来源是列表内嵌）
+
+export 的商家回复（store_feedback）自动合并两个来源，内容不丢：
+
+1. **列表内嵌（主来源）**：评论列表响应的 `comments[]` 里 userType==10 的条目。**回复内容是全的**，只滚列表即可全部获得，无需点开详情页。唯一缺失：无回复时间。
+2. **回复接口（补充，仅补时间）**：`m.dianping.com/ugc/paginateDpFeedReply`，请求 URL 的 `mainId` 参数关联评论，`result.records[]` 含 `replyTime`。**只有操作者在抓取期间点开过评论详情页才会触发该请求**。内容与列表内嵌一致（实测一致），作用是给回复补上时间，格式 `[商家回应 2026-08-14]内容`。
+
+合并去重规则：同一回复文本只在回复接口版本（带时间）出现时用带时间版本，其余用内嵌版本。因此**只滚列表就能拿到全部回复内容**；若需要回复时间，才需要在抓取期间点开带"商家回复"的评论详情页（该接口 token 动态绑定会话，无法事后重放）。
 
 ## 完整调用序列（推荐）
 
 ```
 1. check-env --json          # 退出码非 0 则先跑 setup_env.ps1 修复环境
-2. capture <name> <id> ... --json   # 需要人工打开评论列表页
-3. export <id> --org-code ... --json  # 得到 CSV 直接导入 store_reviews
+2. capture <name> <id> ... --json   # 需要人工打开评论列表页（回复内容随列表一并抓全；如需回复时间，期间点开带商家回复的评论详情）
+3. export <id> --org-code ... --json  # 得到 CSV 直接导入 store_reviews；检查 reviews_with_replies
+4. 把导出的 CSV 文件发给用户  # 必做：用输出里的 output 路径，以 computer:// 链接形式在回复中提供给用户
 ```
 
 ## 注意事项

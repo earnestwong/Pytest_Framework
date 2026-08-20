@@ -106,7 +106,9 @@ Write-Step "Step 2: Install Python packages"
 
 $packages = @("mitmproxy", "pywin32")
 foreach ($pkg in $packages) {
+    # pywin32 has no importable top-level module; win32gui is what we actually use
     $modName = $pkg.Replace("-", "_")
+    if ($pkg -eq "pywin32") { $modName = "win32gui" }
     Write-Host "  Checking $pkg ..."
     $installed = & $pythonExe -c "import importlib; m=importlib.import_module('$modName'); print(getattr(m,'__version__','installed'))" 2>$null
     if ($LASTEXITCODE -eq 0) {
@@ -133,15 +135,25 @@ foreach ($pkg in $packages) {
 }
 
 Write-Host "  pywin32 post-install..."
+# Only needed for COM registration; win32gui/win32api work without it.
+# Native stderr + $ErrorActionPreference=Stop escalates tracebacks into
+# terminating errors, so relax EAP around these calls.
 $scriptsDir = Join-Path (Split-Path $pythonExe) "Scripts"
 $postInstall = Join-Path $scriptsDir "pywin32_postinstall.py"
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 if (Test-Path $postInstall) {
     & $pythonExe $postInstall -install 2>$null
-    Write-OK "pywin32 post-install done"
+    if ($LASTEXITCODE -eq 0) {
+        Write-OK "pywin32 post-install done"
+    } else {
+        Write-Warn "pywin32 post-install failed (COM registration only, not required by this tool)"
+    }
 } else {
     & $pythonExe -c "import pywin32_postinstall; pywin32_postinstall.install()" 2>$null
     Write-Warn "pywin32 post-install may need manual run"
 }
+$ErrorActionPreference = $prevEap
 
 # ============================================================
 # 3. mitmproxy CA certificate
