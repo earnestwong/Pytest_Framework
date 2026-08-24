@@ -35,14 +35,12 @@ import threading
 import time
 from datetime import datetime, timedelta
 
-VERSION = "2.6.0"
+VERSION = "2.6.1"
 
-if os.name == "nt":
-    try:
-        sys.stdout.reconfigure(encoding="utf-8")
-        sys.stderr.reconfigure(encoding="utf-8")
-    except Exception:
-        pass
+# NOTE: no sys.stdout/stderr.reconfigure() here. On Python 3.13.0 (and some
+# PyInstaller/console setups) reconfigure raises OSError 22 and can leave the
+# stream broken, which then crashes the very next write. Output encoding is
+# handled robustly by _write_stdout()/_write_stderr_line() below.
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -65,12 +63,58 @@ _JSON_MODE = False
 _LOG_FP = None
 
 
+def _write_stdout(text, utf8_first=True):
+    """Write text + newline to stdout without depending on reconfigure().
+    Machine JSON (utf8_first=True) is emitted as UTF-8 bytes so agents always
+    get clean UTF-8 regardless of the environment's console/pipe codepage.
+    Human output prefers native encoding, then falls back to UTF-8 bytes, so a
+    foreign console/pipe can never crash the tool."""
+    if utf8_first:
+        buf = getattr(sys.stdout, "buffer", None)
+        if buf is not None:
+            try:
+                buf.write(text.encode("utf-8") + b"\n")
+                buf.flush()
+                return
+            except Exception:
+                pass
+    try:
+        sys.stdout.write(text + "\n")
+        sys.stdout.flush()
+        return
+    except Exception:
+        pass
+    buf = getattr(sys.stdout, "buffer", None)
+    if buf is not None:
+        try:
+            buf.write(text.encode("utf-8") + b"\n")
+            buf.flush()
+        except Exception:
+            pass
+
+
+def _write_stderr_line(line):
+    """Write a human log line to stderr, native encoding first then UTF-8 bytes,
+    so an exotic encoding never crashes a capture run."""
+    try:
+        sys.stderr.write(line + "\n")
+        sys.stderr.flush()
+    except Exception:
+        buf = getattr(sys.stderr, "buffer", None)
+        if buf is not None:
+            try:
+                buf.write(line.encode("utf-8") + b"\n")
+                buf.flush()
+            except Exception:
+                pass
+
+
 def log(msg, level="INFO"):
     """Human-readable log -> stderr (and optional log file)."""
     if _QUIET:
         return
     line = f"[{time.strftime('%H:%M:%S')}] [{level}] {msg}"
-    print(line, file=sys.stderr, flush=True)
+    _write_stderr_line(line)
     if _LOG_FP:
         try:
             _LOG_FP.write(line + "\n")
@@ -85,7 +129,7 @@ def emit_result(payload):
     payload.setdefault("tool", "dianping_scraper")
     payload.setdefault("version", VERSION)
     payload["finished_at"] = datetime.now().isoformat(timespec="seconds")
-    print(json.dumps(payload, ensure_ascii=False), flush=True)
+    _write_stdout(json.dumps(payload, ensure_ascii=False), True)
 
 
 def open_log_file(path):
@@ -246,7 +290,7 @@ def cmd_check_env(args):
         log(f"ca trusted  : {'ok' if cert_trusted else 'NOT INSTALLED'}")
         log(f"ready       : {ready}")
         if not _QUIET:
-            print(json.dumps(result, ensure_ascii=False, indent=2))
+            _write_stdout(json.dumps(result, ensure_ascii=False, indent=2), False)
 
     return EXIT_OK if ready else EXIT_ENV
 

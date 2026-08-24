@@ -1,10 +1,11 @@
 # dianping_scraper 调用接口说明（供 Agent 使用）
 
-版本: 2.6.0 ｜ 平台: Windows ｜ 可执行文件: `dianping_scraper.exe`（等价 Python 脚本: `dianping_scraper.py`）
+版本: 2.6.1 ｜ 平台: Windows ｜ 可执行文件: `dianping_scraper.exe`（等价 Python 脚本: `dianping_scraper.py`）
 
 ## 核心约定
 
 - 所有子命令支持 `--json`：stdout 只输出**最后一行单行 JSON 结果**（键 `status` 表示结果），人类可读日志全部走 stderr。解析时读 stdout 最后一行即可。
+- **stdout 的 JSON 固定以 UTF-8 字节输出**（v2.6.1 起不再依赖 `sys.stdout.reconfigure()`，因为它在 Python 3.13 控制台/部分打包环境下会抛 `OSError 22` 并弄坏 stream，导致接下来写结果时崩溃退出）。跨机器运行时，无论目标机控制台/管道代码页如何，stdout 那行 JSON 都是干净 UTF-8，可放心 `utf-8` 解码。
 - 所有子命令支持 `--quiet`：抑制 stderr 日志。
 - 退出码：
 
