@@ -35,7 +35,7 @@ import threading
 import time
 from datetime import datetime, timedelta
 
-VERSION = "2.6.1"
+VERSION = "2.7.1"
 
 # NOTE: no sys.stdout/stderr.reconfigure() here. On Python 3.13.0 (and some
 # PyInstaller/console setups) reconfigure raises OSError 22 and can leave the
@@ -298,15 +298,40 @@ def cmd_check_env(args):
 # capture
 # ---------------------------------------------------------------------------
 ADDON_TEMPLATE = r'''
-import json, os
+import json, os, re
 from mitmproxy import http, ctx
 
 OUTPUT_FILE = os.environ.get("DP_CAPTURE_FILE", "dianping_capture.jsonl")
+BLOCK_IMAGES = os.environ.get("DP_BLOCK_IMAGES") == "1"
 HOSTS = ("dianping.com", "dpfile.com", "meituan.com")
+_IMG_RE = re.compile(
+    r"\.(jpe?g|png|gif|webp|bmp|svg|ico|avif|heic|heif|tiff?|jfif"
+    r"|mp4|mov|avi|webm|m3u8|ts|flv|mkv)(\?|$)", re.I)
+_PATH_MEDIA_RE = re.compile(
+    r"(/img/|/pic/|/avatar/|/thumb/|/cover/|/icon/|/media/"
+    r"|/upload/|/cdn/|/images/|/video/|/logo/)", re.I)
+_TRANSPARENT_GIF = (
+    b"\x47\x49\x46\x38\x39\x61\x01\x00\x01\x00\x80\x00\x00"
+    b"\xff\xff\xff\x00\x00\x00\x21\xf9\x04\x00\x00\x00\x00"
+    b"\x00\x2c\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02"
+    b"\x44\x01\x00\x3b"
+)
 
 def _is_dp(flow):
     host = flow.request.pretty_host or ""
     return any(h in host for h in HOSTS)
+
+def _is_media_req(req):
+    """Check if a request is for image/video by URL extension, path keywords,
+    or Accept header. This catches most CDN URLs, extensionless paths, and
+    video streaming formats."""
+    url = req.pretty_url
+    if _IMG_RE.search(url) or _PATH_MEDIA_RE.search(url):
+        return True
+    accept = (req.headers.get("Accept", "") or "").lower()
+    if "image/" in accept or "video/" in accept:
+        return True
+    return False
 
 def _bin(ct):
     ct = (ct or "").lower()
@@ -320,6 +345,14 @@ def request(flow: http.HTTPFlow):
     if not _is_dp(flow):
         return
     req = flow.request
+    if BLOCK_IMAGES and _is_media_req(req):
+        flow.response = http.Response.make(
+            200, _TRANSPARENT_GIF,
+            {"Content-Type": "image/gif",
+             "Cache-Control": "no-store, max-age=0",
+             "Access-Control-Allow-Origin": "*"})
+        ctx.log.info(f"[DP] BLOCKED media {req.pretty_url[:100]}")
+        return
     _write({"type": "request", "method": req.method, "url": req.pretty_url,
             "headers": dict(req.headers), "body": req.get_text(strict=False),
             "timestamp": req.timestamp_start})
@@ -328,6 +361,18 @@ def response(flow: http.HTTPFlow):
     if not _is_dp(flow) or not getattr(flow, "response", None):
         return
     resp = flow.response
+    ct = (resp.headers.get("content-type", "") or "").lower()
+    # Fallback: if the response has image/video content type but the request
+    # wasn't caught by the URL/header heuristics (e.g. extensionless CDN URLs),
+    # replace the body with the transparent GIF. Skip if already GIF (means
+    # already blocked in request hook).
+    if (BLOCK_IMAGES and ct.startswith("image/") and "image/gif" not in ct
+        and not _is_media_req(flow.request)):
+        resp.status_code = 200
+        resp.headers["content-type"] = "image/gif"
+        resp.headers["Cache-Control"] = "no-store, max-age=0"
+        resp.content = _TRANSPARENT_GIF
+        ctx.log.info(f"[DP] FALLBACK blocked {flow.request.pretty_url[:100]}")
     if _bin(resp.headers.get("content-type")):
         body = ""
     else:
@@ -740,6 +785,9 @@ def cmd_capture(args):
         env = os.environ.copy()
         env["DP_CAPTURE_FILE"] = capture_file
         env["PYTHONIOENCODING"] = "utf-8"
+        if args.no_images:
+            env["DP_BLOCK_IMAGES"] = "1"
+            log("--no-images: image requests will be blocked (1x1 transparent GIF)")
 
         mitm_err_log = os.path.join(out_dir, f"{store_id}_mitmdump.err.log")
         err_fp = open(mitm_err_log, "wb")
@@ -1350,6 +1398,7 @@ def build_parser():
     sp.add_argument("--capture-file", help="explicit capture jsonl path")
     sp.add_argument("--log-file", help="explicit log file path")
     sp.add_argument("--no-scroll", action="store_true", help="capture only, no auto scroll")
+    sp.add_argument("--no-images", action="store_true", help="block all image requests (return 1x1 transparent GIF) to reduce DOM/memory pressure; makes scrolling smoother")
     sp.add_argument("--cursor-pos", help="explicit 'x,y' cursor position for scrolling")
     sp.add_argument("--window-keyword", action="append",
                     help="window title keyword to locate mini-program window (repeatable)")

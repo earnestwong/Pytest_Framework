@@ -1,6 +1,6 @@
 # dianping_scraper 调用接口说明（供 Agent 使用）
 
-版本: 2.6.1 ｜ 平台: Windows ｜ 可执行文件: `dianping_scraper.exe`（等价 Python 脚本: `dianping_scraper.py`）
+版本: 2.7.1 ｜ 平台: Windows ｜ 可执行文件: `dianping_scraper.exe`（等价 Python 脚本: `dianping_scraper.py`）
 
 ## 核心约定
 
@@ -57,6 +57,7 @@ dianping_scraper.exe capture <store_name> <store_id> [options] --json
 | `--capture-file` | 自动 | 显式指定 jsonl 路径 |
 | `--log-file` | 自动 | 显式指定日志路径 |
 | `--no-scroll` | off | 只代理抓包，不自动滚动 |
+| `--no-images` | off | 拦截所有图片和视频请求，返回 1x1 透明 GIF 代替。支持后缀匹配（jpg/png/gif/webp/avif/heic/mp4/m3u8 等 20+ 格式）、路径关键词匹配（img/avatar/thumb/video/upload 等）、Accept 头部匹配，以及在 response 钩子按 Content-Type 兜底拦截。小程序图片/视频变"加载失败"效果，大幅减少 DOM 节点和图片解码的内存压力，滚动更流畅 |
 | `--cursor-pos` | 自动 | 手动指定滚轮位置 `x,y`（覆盖窗口自动定位） |
 | `--window-keyword` | 大众点评等 | 窗口标题关键词，可重复 |
 
