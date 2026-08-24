@@ -31,10 +31,11 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from datetime import datetime, timedelta
 
-VERSION = "2.0.0"
+VERSION = "2.6.0"
 
 if os.name == "nt":
     try:
@@ -263,32 +264,52 @@ def _is_dp(flow):
     host = flow.request.pretty_host or ""
     return any(h in host for h in HOSTS)
 
+def _bin(ct):
+    ct = (ct or "").lower()
+    return any(x in ct for x in ("image/", "font/", "video/", "audio/", "octet-stream"))
+
+def _write(entry):
+    with open(OUTPUT_FILE, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
 def request(flow: http.HTTPFlow):
     if not _is_dp(flow):
         return
     req = flow.request
-    entry = {"type": "request", "method": req.method, "url": req.pretty_url,
-             "headers": dict(req.headers), "body": req.get_text(strict=False),
-             "timestamp": req.timestamp_start}
-    with open(OUTPUT_FILE, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    _write({"type": "request", "method": req.method, "url": req.pretty_url,
+            "headers": dict(req.headers), "body": req.get_text(strict=False),
+            "timestamp": req.timestamp_start})
 
 def response(flow: http.HTTPFlow):
-    if not _is_dp(flow):
+    if not _is_dp(flow) or not getattr(flow, "response", None):
         return
     resp = flow.response
-    ct = (resp.headers.get("content-type") or "").lower()
-    if any(x in ct for x in ("image/", "font/", "video/", "audio/", "octet-stream")):
+    if _bin(resp.headers.get("content-type")):
         body = ""
     else:
-        body = resp.get_text(strict=False)
-    entry = {"type": "response", "url": flow.request.pretty_url,
-             "status": resp.status_code, "headers": dict(resp.headers),
-             "body": body, "timestamp": resp.timestamp_end}
-    with open(OUTPUT_FILE, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        body = resp.get_text(strict=False) or ""
+    _write({"type": "response", "url": flow.request.pretty_url,
+            "status": resp.status_code, "headers": dict(resp.headers),
+            "body": body, "timestamp": resp.timestamp_end})
     ctx.log.info(f"[DP] {resp.status_code} {flow.request.pretty_url[:120]}")
 '''
+
+
+def _autotune(args, total, scp):
+    """Update scroll params from the shop's total review count. Only overrides
+    params the user did not explicitly set. Returns (scp, applied)."""
+    applied = bool(total)
+    if applied:
+        est_rounds = max(100.0, total / 10.0)   # ~10 reviews per base-amplitude round
+        if args.max_scroll is None:
+            scp["max_scroll"] = max(500, int(est_rounds * 1.3))
+        if args.scroll_ramp is None:
+            scp["ramp"] = max(120.0, est_rounds * 0.5)
+        if args.scroll_interval_max is None:
+            scp["iv_max"] = min(4.0, 2.0 + total / 6000.0)
+        if args.scroll_clicks_max is None:
+            scp["cl_max"] = min(24, max(14, int(10 + total / 2500.0)))
+    return scp, applied
 
 
 def write_addon():
@@ -298,14 +319,113 @@ def write_addon():
     return path
 
 
+# ---------------------------------------------------------------------------
+# PAC-based proxy: only Dianping/Meituan hosts are routed through mitmproxy,
+# everything else stays DIRECT => other apps keep their network untouched
+# (no mitm CA needed, no disruption). The whitelist is generated from DP_HOSTS
+# (the exact same domains the addon captures), so every request the tool can
+# capture is guaranteed to go through the proxy.
+# ---------------------------------------------------------------------------
+_pac_server = None
+_prev_proxy = {}   # prior WinINET settings, restored on disable
+
+
+def _proxy_pac_text(mitm_port):
+    conds = " || ".join(
+        (f'h === "{h}" || h.endsWith(".{h}")') for h in DP_HOSTS)
+    return ("function FindProxyForURL(url, host) {\n"
+            "  var h = host.toLowerCase();\n"
+            f"  if ({conds}) return 'PROXY 127.0.0.1:{mitm_port}';\n"
+            "  return 'DIRECT';\n"
+            "}\n")
+
+
+def _ensure_pac_server(mitm_port):
+    """Serve /proxy.pac on 127.0.0.1 (ephemeral port), restart omitted.
+    Returns the bound (host, port)."""
+    global _pac_server
+    if _pac_server is None:
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        store = [_proxy_pac_text(mitm_port)]
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path.split("?")[0] != "/proxy.pac":
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                body = store[0].encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type",
+                                 "application/x-ns-proxy-autoconfig")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        server._dp_store = store
+        _pac_server = server
+        threading.Thread(target=server.serve_forever,
+                         daemon=True, name="pac-server").start()
+    else:
+        _pac_server._dp_store[0] = _proxy_pac_text(mitm_port)
+    return _pac_server.server_address[1]
+
+
+def _stop_pac_server():
+    global _pac_server
+    if _pac_server is not None:
+        try:
+            _pac_server.shutdown()
+        except Exception:
+            pass
+        try:
+            _pac_server.server_close()
+        except Exception:
+            pass
+        _pac_server = None
+
+
 def set_system_proxy(enable, port):
     import winreg
     import ctypes
     key = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
-    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key, 0, winreg.KEY_ALL_ACCESS) as k:
-        winreg.SetValueEx(k, "ProxyEnable", 0, winreg.REG_DWORD, 1 if enable else 0)
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key, 0,
+                        winreg.KEY_ALL_ACCESS) as k:
         if enable:
-            winreg.SetValueEx(k, "ProxyServer", 0, winreg.REG_SZ, f"127.0.0.1:{port}")
+            for name in ("ProxyEnable", "ProxyServer", "AutoConfigURL"):
+                if name not in _prev_proxy:
+                    try:
+                        _prev_proxy[name] = winreg.QueryValueEx(k, name)[0]
+                    except FileNotFoundError:
+                        _prev_proxy[name] = None
+            pac_port = _ensure_pac_server(port)
+            # AutoConfigURL (PAC) is applied even with ProxyEnable; mirror what
+            # Fiddler/Clash do so Chromium-based WeChat picks it up.
+            winreg.SetValueEx(k, "ProxyEnable", 0, winreg.REG_DWORD, 1)
+            winreg.SetValueEx(k, "ProxyServer", 0, winreg.REG_SZ, "")
+            winreg.SetValueEx(k, "AutoConfigURL", 0, winreg.REG_SZ,
+                              f"http://127.0.0.1:{pac_port}/proxy.pac")
+        else:
+            _stop_pac_server()
+            for name in ("ProxyEnable", "ProxyServer", "AutoConfigURL"):
+                if name not in _prev_proxy:
+                    continue
+                val = _prev_proxy.pop(name)
+                if val is None:
+                    try:
+                        winreg.DeleteValue(k, name)
+                    except FileNotFoundError:
+                        pass
+                else:
+                    typ = (winreg.REG_DWORD if name == "ProxyEnable"
+                           else winreg.REG_SZ)
+                    winreg.SetValueEx(k, name, 0, typ, val)
+    # INTERNET_OPTION_SETTINGS_CHANGED(39) + INTERNET_OPTION_REFRESH(37)
     ctypes.windll.wininet.InternetSetOptionW(0, 39, 0, 0)
     ctypes.windll.wininet.InternetSetOptionW(0, 37, 0, 0)
 
@@ -505,6 +625,14 @@ def cmd_capture(args):
                     mitm.kill()
                 except Exception:
                     pass
+        if mitm:
+            # Fallback: name-based kill in case the Popen handle was lost or the
+            # terminate() above hung (this capture started a mitmdump).
+            try:
+                subprocess.run(["taskkill", "/F", "/IM", "mitmdump.exe"],
+                               capture_output=True)
+            except Exception:
+                pass
         if addon_path:
             try:
                 os.unlink(addon_path)
@@ -520,6 +648,48 @@ def cmd_capture(args):
     except Exception:
         pass
 
+    # Watchdog: if the scroll loop stops emitting heartbeats (main thread frozen
+    # inside some call), force cleanup + exit instead of hanging silently with a
+    # residual mitmdump and system proxy (the root cause of the 15-min stalls).
+    heartbeat = {"t": 0.0}
+    stop_watchdog = threading.Event()
+    watchdog = None
+
+    def _start_watchdog():
+        nonlocal watchdog
+        heartbeat["t"] = time.time()
+
+        def _loop():
+            while not stop_watchdog.is_set():
+                stop_watchdog.wait(timeout=2)
+                if stop_watchdog.is_set():
+                    return
+                idle = time.time() - heartbeat["t"]
+                if idle > args.idle_timeout:
+                    log(f"WATCHDOG: no scroll progress for {idle:.0f}s, "
+                        f"forcing cleanup to avoid hanging", "ERROR")
+                    result["stop_reason"] = "hang_force_stop"
+                    result["status"] = "partial"
+                    try:
+                        emit_result(result)
+                    except Exception:
+                        pass
+                    try:
+                        cleanup()
+                    except Exception as ex:
+                        log(f"WATCHDOG cleanup error: {ex}", "ERROR")
+                    close_log_file()
+                    os._exit(EXIT_PARTIAL)
+
+        watchdog = threading.Thread(target=_loop, name="scrap-watchdog")
+        watchdog.daemon = True
+        watchdog.start()
+
+    def _stop_watchdog():
+        stop_watchdog.set()
+        if watchdog and watchdog.is_alive():
+            watchdog.join(timeout=3)
+
     try:
         kill_port(args.port)
         addon_path = write_addon()
@@ -529,8 +699,11 @@ def cmd_capture(args):
 
         mitm_err_log = os.path.join(out_dir, f"{store_id}_mitmdump.err.log")
         err_fp = open(mitm_err_log, "wb")
+        # NOTE: no --ignore-hosts here. In this mitmproxy build its host regex can
+        # tunnel dianping traffic too (breaks review detection), so we TLS-intercept
+        # everything. The addon already filters which requests get written to disk.
         mitm_args = ["-p", str(args.port), "-s", addon_path,
-                     "--set", "flow_detail=4", "--set", "ssl_insecure=true"]
+                     "--set", "flow_detail=1", "--set", "ssl_insecure=true"]
         if mitm_mode == "exe":
             cmdline = [mitm_path] + mitm_args
         else:
@@ -570,9 +743,29 @@ def cmd_capture(args):
             return EXIT_TIMEOUT
         log("review-list request detected! start scrolling")
 
+        # Resolve scroll params; unset ones are auto-tuned from the total review
+        # count whenever the list API reports it (initially, then re-applied
+        # mid-scroll as soon as shopReviewCount shows up).
+        iv_base = args.scroll_interval
+        cl_base = args.scroll_clicks
+        scp = {"max_scroll": args.max_scroll if args.max_scroll is not None else 3000,
+               "iv_max": args.scroll_interval_max if args.scroll_interval_max is not None else 3.0,
+               "cl_max": args.scroll_clicks_max if args.scroll_clicks_max is not None else 20,
+               "ramp": args.scroll_ramp if args.scroll_ramp is not None else 300.0}
+        cnt, _ = count_reviews(capture_file, prog)   # pick up shopReviewCount from first response
+        scp, tuned_now = _autotune(args, prog["shop_review_count"], scp)
+        if tuned_now:
+            log(f"auto-tuned (shop_review_count={prog['shop_review_count']}): "
+                f"max_scroll={scp['max_scroll']}, interval->{scp['iv_max']:.2f}s, "
+                f"clicks->{scp['cl_max']}, ramp={scp['ramp']:.0f}")
+        else:
+            log("auto-tune pending: no shopReviewCount in first response; "
+                "will apply once the total appears during scrolling")
+
         if args.no_scroll:
             log("--no-scroll set, skip auto scroll")
         else:
+            _start_watchdog()
             if args.cursor_pos:
                 try:
                     cx, cy = [int(v) for v in args.cursor_pos.split(",")]
@@ -601,15 +794,28 @@ def cmd_capture(args):
             prev_cnt = cnt
             stall = 0
             stop_reason = None
-            for i in range(args.max_scroll):
-                scroll_down(args.scroll_clicks)
-                time.sleep(args.scroll_interval)
+            tuned_applied = tuned_now
+            i = 0
+            while i < scp["max_scroll"]:
+                heartbeat["t"] = time.time()
+                frac = min(1.0, i / scp["ramp"]) if scp["ramp"] > 0 else 1.0
+                interval = iv_base + (scp["iv_max"] - iv_base) * frac
+                clicks = max(1, int(round(cl_base + (scp["cl_max"] - cl_base) * frac)))
+                scroll_down(clicks)
+                time.sleep(interval)
                 if (i + 1) % args.check_every == 0:
                     cnt, max_s = count_reviews(capture_file, prog)
+                    if not tuned_applied and prog["shop_review_count"]:
+                        scp, _ = _autotune(args, prog["shop_review_count"], scp)
+                        tuned_applied = True
+                        log(f"auto-tuned mid-scroll (shop_review_count={prog['shop_review_count']}): "
+                            f"interval->{scp['iv_max']:.2f}s, clicks->{scp['cl_max']}, "
+                            f"ramp={scp['ramp']:.0f}")
                     delta = cnt - prev_cnt
-                    log(f"scroll {i+1}/{args.max_scroll} | reviews {cnt}"
+                    log(f"scroll {i+1}/{scp['max_scroll']} | reviews {cnt}"
                         + (f"/{args.target}" if args.target else "")
                         + f" | +{delta}"
+                        + f" | iv {interval:.2f}s x{clicks}"
                         + (" | isEnd=True" if prog["is_end"] else ""))
                     if prog["is_end"]:
                         log("API returned isEnd=true: reached the end of the review list")
@@ -628,8 +834,10 @@ def cmd_capture(args):
                     else:
                         stall = 0
                     prev_cnt = cnt
+                i += 1
             if stop_reason is None:
                 stop_reason = "max_scroll"
+            _stop_watchdog()
 
         cnt, max_s = count_reviews(capture_file, prog)
         result["reviews"] = cnt
@@ -660,6 +868,7 @@ def cmd_capture(args):
         emit_result(result)
         return EXIT_ERROR
     finally:
+        _stop_watchdog()
         cleanup()
         close_log_file()
 
@@ -765,58 +974,98 @@ def normalize_reply_date(t):
     return str(t)
 
 
-def collect_reply_api_replies(fh, reply_map):
-    """Parse paginateDpFeedReply responses.
+SHOP_SID_PREFIX_LEN = 24   # sid = "qB4r1" + 19-char shop hex + per-session tail
 
-    The response entry's URL carries the request's `mainId` query param, which
-    links the reply page to its review. reply_map: mainId -> {replyKey: dict}."""
-    n = 0
-    for line in fh:
-        try:
-            e = json.loads(line)
-        except Exception:
-            continue
-        if not isinstance(e, dict) or e.get("type") != "response":
-            continue
-        if REPLY_API_KEYWORD not in e.get("url", ""):
-            continue
-        m = re.search(r"[?&]mainId=(\d+)", e.get("url", ""))
-        if not m:
-            continue
-        mid = m.group(1)
-        body = e.get("body") or ""
-        if not body:
-            continue
-        try:
-            data = json.loads(body)
-        except Exception:
-            continue
-        if not isinstance(data, dict):
-            continue
-        r = data.get("result")
-        if not isinstance(r, dict):
-            continue
-        recs = r.get("records") or []
-        bucket = reply_map.setdefault(mid, {})
-        for rec in recs:
-            if not isinstance(rec, dict):
+
+def prescan_capture(capture_file):
+    """Single pass over the capture file to (a) group reviews by shop via
+    shopidencrypt prefix and (b) collect reply-API replies.
+
+    A capture file can contain reviews from several shops: the operator may
+    browse other stores mid-capture, and the "全部" tab (outsideshopreviewlist)
+    also injects related-shop recommendation reviews. Each item carries
+    shopidencrypt, whose first 24 chars are the stable shop identity (the tail
+    varies per capture session).
+    Returns (mid -> shop prefix, {prefix: unique review count},
+    {prefix: poi title}, reply_map: mainId -> {replyKey: dict})."""
+    mid_shop = {}
+    shop_counts = {}
+    shop_poi = {}
+    reply_map = {}
+    with open(capture_file, "r", encoding="utf-8", errors="ignore") as fh:
+        for line in fh:
+            try:
+                e = json.loads(line)
+            except Exception:
                 continue
-            fu = rec.get("fromUser") or {}
-            text = reply_plain_text(rec.get("content"))
-            if not text:
+            if not isinstance(e, dict) or e.get("type") != "response":
                 continue
-            key = str(rec.get("feedReplyIdL") or rec.get("feedReplyId")
-                      or f"{fu.get('userName')}|{text[:50]}")
-            if key in bucket:
+            url = e.get("url", "")
+            if REPLY_API_KEYWORD in url:
+                m = re.search(r"[?&]mainId=(\d+)", url)
+                if not m:
+                    continue
+                mid = m.group(1)
+                body = e.get("body") or ""
+                if not body:
+                    continue
+                try:
+                    data = json.loads(body)
+                except Exception:
+                    continue
+                if not isinstance(data, dict):
+                    continue
+                r = data.get("result")
+                if not isinstance(r, dict):
+                    continue
+                bucket = reply_map.setdefault(mid, {})
+                for rec in (r.get("records") or []):
+                    if not isinstance(rec, dict):
+                        continue
+                    fu = rec.get("fromUser") or {}
+                    text = reply_plain_text(rec.get("content"))
+                    if not text:
+                        continue
+                    key = str(rec.get("feedReplyIdL") or rec.get("feedReplyId")
+                              or f"{fu.get('userName')}|{text[:50]}")
+                    if key in bucket:
+                        continue
+                    bucket[key] = {
+                        "user_type": fu.get("userType"),
+                        "user_name": fu.get("userName") or "",
+                        "time": normalize_reply_date(rec.get("replyTime")),
+                        "text": text,
+                    }
                 continue
-            bucket[key] = {
-                "user_type": fu.get("userType"),
-                "user_name": fu.get("userName") or "",
-                "time": normalize_reply_date(rec.get("replyTime")),
-                "text": text,
-            }
-            n += 1
-    return n
+            if REVIEW_API_KEYWORD not in url:
+                continue
+            body = e.get("body", "")
+            if not body:
+                continue
+            try:
+                data = json.loads(body)
+            except Exception:
+                continue
+            if not isinstance(data, dict):
+                continue
+            r = data.get("result")
+            r = r if isinstance(r, dict) else {}
+            for item in (data.get("list") or r.get("reviewList", []) or []):
+                if not isinstance(item, dict):
+                    continue
+                mid = str(item.get("mainId", ""))
+                sid = item.get("shopidencrypt") or ""
+                if not mid or not sid:
+                    continue
+                key = sid[:SHOP_SID_PREFIX_LEN]
+                if mid not in mid_shop:
+                    mid_shop[mid] = key
+                    shop_counts[key] = shop_counts.get(key, 0) + 1
+                if key not in shop_poi:
+                    title = (item.get("shopPoiRelevant") or {}).get("title") or ""
+                    if title:
+                        shop_poi[key] = title
+    return mid_shop, shop_counts, shop_poi, reply_map
 
 
 def extract_reviews_from_jsonl(capture_file, org_code, store_name, rating_scale):
@@ -830,11 +1079,14 @@ def extract_reviews_from_jsonl(capture_file, org_code, store_name, rating_scale)
         but no reply time) -- obtained by simply scrolling the list
       - paginateDpFeedReply responses (same content, adds replyTime) -- only
         captured if the operator clicks into review detail pages
+    Reviews are filtered to the dominant shop (most captured reviews) via
+    shopidencrypt, so other stores browsed mid-capture or injected as
+    related-shop recommendations are dropped.
     Returns (rows, stats). Dedupe by mainId."""
 
-    reply_map = {}
-    with open(capture_file, "r", encoding="utf-8", errors="ignore") as fh:
-        reply_total = collect_reply_api_replies(fh, reply_map)
+    mid_shop, shop_counts, shop_poi, reply_map = prescan_capture(capture_file)
+    dominant_sid = max(shop_counts, key=shop_counts.get) if shop_counts else None
+    foreign_mids = {mid for mid, sid in mid_shop.items() if sid != dominant_sid}
     reply_map = {mid: b for mid, b in reply_map.items() if b}
 
     reviews = {}
@@ -866,6 +1118,8 @@ def extract_reviews_from_jsonl(capture_file, org_code, store_name, rating_scale)
                     continue
                 mid = str(item.get("mainId", ""))
                 if not mid or mid in reviews:
+                    continue
+                if mid in foreign_mids:
                     continue
                 fu = item.get("feedUser") or {}
                 username = fu.get("userName") or fu.get("nickName") \
@@ -926,6 +1180,10 @@ def extract_reviews_from_jsonl(capture_file, org_code, store_name, rating_scale)
         "merchant_replies_from_reply_api": merchant_from_api,
         "merchant_replies_embedded_extra": embedded_merchant,
         "reply_api_mainIds": len(reply_map),
+        "shops_detected": len(shop_counts),
+        "shop_id_prefix": (dominant_sid[:12] + "...") if dominant_sid else None,
+        "shop_name": shop_poi.get(dominant_sid),
+        "foreign_reviews_dropped": len(foreign_mids),
     }
     return list(reviews.values()), stats
 
@@ -971,10 +1229,18 @@ def cmd_export(args):
               "format": args.format, "sentiment": dist, "source": os.path.abspath(capture_file),
               "reviews_with_replies": with_feedback,
               "reply_stats": reply_stats}
+    warnings = []
     if with_feedback == 0 and len(items) > 0:
-        result["warning"] = ("no merchant replies found in any review -- replies come "
-                             "from the review list itself (comments[]), so verify the "
-                             "store actually has 商家回复 on the dianping page")
+        warnings.append("no merchant replies found in any review -- replies come "
+                        "from the review list itself (comments[]), so verify the "
+                        "store actually has 商家回复 on the dianping page")
+    if reply_stats.get("foreign_reviews_dropped", 0) > 0:
+        kept = reply_stats.get("shop_name") or reply_stats.get("shop_id_prefix")
+        warnings.append(f"dropped {reply_stats['foreign_reviews_dropped']} reviews from "
+                        f"{reply_stats['shops_detected'] - 1} other shop(s) found in the "
+                        f"capture file; only the dominant store ({kept}) was exported")
+    if warnings:
+        result["warning"] = "; ".join(warnings)
     if _JSON_MODE:
         emit_result(result)
     else:
@@ -984,6 +1250,11 @@ def cmd_export(args):
         log(f"  reviews with merchant replies: {with_feedback}")
         log(f"  replies from reply API: {reply_stats['merchant_replies_from_reply_api']}, "
             f"embedded extras: {reply_stats['merchant_replies_embedded_extra']}")
+        if reply_stats.get("foreign_reviews_dropped", 0) > 0:
+            kept = reply_stats.get("shop_name") or reply_stats.get("shop_id_prefix")
+            log(f"  shop filter: kept {kept}, dropped "
+                f"{reply_stats['foreign_reviews_dropped']} reviews from "
+                f"{reply_stats['shops_detected'] - 1} other shop(s)")
         emit_result(result)
     return EXIT_OK
 
@@ -1013,12 +1284,23 @@ def build_parser():
     sp.add_argument("store_id", help="store id / org code, e.g. 080501")
     sp.add_argument("--target", type=int, default=None,
                     help="stop when unique review count reaches N; omit to run until isEnd/max-scroll (recommended)")
-    sp.add_argument("--max-scroll", type=int, default=3000, help="max scroll rounds (default 3000)")
+    sp.add_argument("--max-scroll", type=int, default=None,
+                    help="max scroll rounds; auto-derived from total review count, else 3000 (default: auto)")
     sp.add_argument("--port", type=int, default=8888, help="proxy port (default 8888)")
-    sp.add_argument("--scroll-clicks", type=int, default=10, help="wheel clicks per round (default 10)")
-    sp.add_argument("--scroll-interval", type=float, default=1.0, help="seconds between rounds (default 1.0)")
+    sp.add_argument("--scroll-clicks", type=int, default=10,
+                    help="base wheel clicks per round; grows toward --scroll-clicks-max as scrolling deepens (default 10)")
+    sp.add_argument("--scroll-clicks-max", type=int, default=None,
+                    help="dynamic upper cap for wheel clicks per round; auto-derived, else 20")
+    sp.add_argument("--scroll-interval", type=float, default=1.0,
+                    help="base seconds between rounds; grows toward --scroll-interval-max as scrolling deepens (default 1.0)")
+    sp.add_argument("--scroll-interval-max", type=float, default=None,
+                    help="dynamic upper cap for per-round interval; auto-derived, else 3.0")
+    sp.add_argument("--scroll-ramp", type=float, default=None,
+                    help="rounds over which clicks & interval ramp from base to max; auto-derived, else 300")
     sp.add_argument("--check-every", type=int, default=20, help="count reviews every N rounds (default 20)")
     sp.add_argument("--stall-limit", type=int, default=3, help="stop after N checks without new reviews (default 3)")
+    sp.add_argument("--idle-timeout", type=float, default=180.0,
+                    help="watchdog: force cleanup+exit if no scroll progress for this many seconds (default 180)")
     sp.add_argument("--wait-timeout", type=int, default=180, help="seconds to wait for first review-list request (default 180)")
     sp.add_argument("--output-dir", help="directory for capture/log files (default: cwd)")
     sp.add_argument("--capture-file", help="explicit capture jsonl path")

@@ -1,6 +1,6 @@
 # dianping_scraper 调用接口说明（供 Agent 使用）
 
-版本: 2.0.0 ｜ 平台: Windows ｜ 可执行文件: `dianping_scraper.exe`（等价 Python 脚本: `dianping_scraper.py`）
+版本: 2.6.0 ｜ 平台: Windows ｜ 可执行文件: `dianping_scraper.exe`（等价 Python 脚本: `dianping_scraper.py`）
 
 ## 核心约定
 
@@ -41,12 +41,16 @@ dianping_scraper.exe capture <store_name> <store_id> [options] --json
 | `store_name` | 必填 | 门店名称（仅用于提示与日志） |
 | `store_id` | 必填 | 门店ID，决定输出文件名 `{store_id}_capture.jsonl` |
 | `--target` | **无（不启用）** | 目标评论条数；**不传则一直抓到 isEnd 到底**（推荐）。传了则在达到 N 条时提前停止 |
-| `--max-scroll` | 3000 | 最大滚动轮数 |
+| `--max-scroll` | 自动 | 最大滚动轮数；未传则按总评论数估算（无总数时 3000） |
 | `--port` | 8888 | 代理端口 |
-| `--scroll-clicks` | 10 | 每轮滚轮格数 |
-| `--scroll-interval` | 1.0 | 轮间隔秒 |
+| `--scroll-clicks` | 10 | 每轮滚轮格数（基准值） |
+| `--scroll-clicks-max` | 自动 | 深层滚动每轮滚轮格数的放大上限（未传按总数估算，无总数 20） |
+| `--scroll-interval` | 1.0 | 轮间隔秒（基准值） |
+| `--scroll-interval-max` | 自动 | 深层滚动轮间隔放大上限（未传按总数估算，无总数 3.0） |
+| `--scroll-ramp` | 自动 | 多少轮后间隔/幅度线性加到上限（未传按总数估算，无总数 300） |
 | `--check-every` | 20 | 每 N 轮统计一次进度 |
 | `--stall-limit` | 3 | 连续 N 次无新增则停止（isEnd 未收到时的兜底，防卡死） |
+| `--idle-timeout` | 180 | 看门狗：滚动主循环持续该秒数无进展（主线程卡死）则强制走收尾退出，不残留 |
 | `--wait-timeout` | 180 | 等待用户打开评论列表的超时秒数 |
 | `--output-dir` | cwd | 抓取文件/日志输出目录 |
 | `--capture-file` | 自动 | 显式指定 jsonl 路径 |
@@ -57,18 +61,21 @@ dianping_scraper.exe capture <store_name> <store_id> [options] --json
 
 **关键行为（调用方必读）：**
 
-1. 启动后先设置系统代理 → 然后打印提示等待**人工**在微信小程序中打开该门店的评论列表页。
+1. 启动后先设置系统代理（**v2.6.0 起为 PAC 白名单代理**，见下方"PAC 代理"说明）→ 然后打印提示等待**人工**在微信小程序中打开该门店的评论列表页。
 2. 检测到 `outsidesiftedreviewlist` 请求后自动定位窗口并开始滚动。
 3. 停止条件（按判定优先级）：
    - **`isEnd=true` 到底（主判定）**：评论接口响应顶层字段 `isEnd` 为 `true` 时立即停止，status=`ok`，`stop_reason=end_reached`
    - **达到 `--target`**（仅当显式传入）：status=`ok`，`stop_reason=target_reached`
    - **停滞兜底**：连续 `--stall-limit` 次检查无新增（网络异常/isEnd 未被抓到的兜底）：status=`partial`，`stop_reason=stalled`
+   - **看门狗强制收尾（v2.3.0）**：滚动主循环持续 `--idle-timeout` 秒无进展（主线程卡死在深层滚动）时，自动关代理、终止并 `taskkill /IM mitmdump.exe` 兜底清理后退出，避免静默挂起残留：status=`partial`，`stop_reason=hang_force_stop`（退出码 4）
    - **滚动上限** `--max-scroll`：status=`partial`，`stop_reason=max_scroll`
    - **等待超时** `--wait-timeout` 秒未检测到评论列表请求（用户未打开页面）：退出码 3，status=`timeout`
    - **用户中断** Ctrl+C：退出码 4，status=`interrupted`
 4. 无论何种退出路径（含异常/中断）都会自动关闭系统代理并终止 mitmdump，不会遗留代理导致断网。
 5. 返回 JSON 含：`reviews`（去重后评论数）、`max_start`、`is_end`、`shop_review_count`（接口报告的评论总数，可用于校验完整性：`reviews == shop_review_count` 表示全量抓齐）、`stop_reason`、`capture_file`。
 6. mitmdump 的错误日志写入 `{store_id}_mitmdump.err.log`。
+7. **抓包范围与资源占用**：v2.2.0 曾先加 `--ignore-hosts`（非点评域名只隧道不解密以省 CPU，但它在本机 mitmproxy 会误伤点评，导致评论列表**检测不到**，v2.5.1 已移除、改全流量 TLS 解密）；v2.2.0 又把 addon 改为**只落盘三类接口 + mainId 去重**，实测发现**过滤版会漏掉真正返回评论的接口，导致 `reviews=0`（列表接口只见 403/空响应）**，**v2.5.2 起 addon 改为全量抓包**（所有点评域名响应落盘、仅排除图片/字体等二进制、不去重不过滤），**该模式下评论正常抓到**。代价是抓取文件体积明显增大、登录埋点等噪音也一并入库，后续如需压缩再按月/按店清理。
+8. **PAC 白名单代理（v2.6.0 起）**：不再把全系统流量劫持进 mitmproxy，改用 **PAC 自动配置**——`FindProxyForURL` 只对 `dianping.com / dpfile.com / meituan.com` 的**所有子域名**返回 `PROXY 127.0.0.1:<port>`，其余一律 `DIRECT`。效果：**只有微信小程序的点评请求走代理，其他应用网络完全不受影响**（不需要 mitm 证书、不断网）。白名单由与 addon 抓包范围完全一致的 `DP_HOSTS` 动态生成，凡工具能抓的请求必进代理，无遗漏。抓取期间在同一系统浏览其他美团系网页也会被劫持解密（证书已装，不影响上网）。PAC 文件由内置本地 HTTP 服务（`127.0.0.1` 随机端口）提供；退出时自动清掉 `AutoConfigURL` 并**恢复你之前的代理设置**（若原本就无代理则删除相关项）。
 
 **典型调用流程：** 提示用户打开评论列表 → 启动 capture（阻塞，可能持续数分钟到数十分钟）→ 依据退出码与 `reviews` 决定是否重试/续抓（重复运行会续写同一 jsonl，解析时按 mainId 去重，安全）。
 
@@ -95,7 +102,8 @@ dianping_scraper.exe export <store_id> --org-code <code> --store-name <name> [op
 - `review_date`：相对时间（"3天前"等）已转为 `YYYY-MM-DD`
 - `sentiment`：好评(≥4.0) / 中评(≥3.0) / 差评，基于 5 分制
 - `store_feedback`：商家回复（userType==10），多条以换行连接。来自回复接口的带时间：`[商家回应 2026-08-14]内容`；仅列表内嵌的：`[商家名]内容`
-- 返回 JSON 含：`rows`、`output`（绝对路径）、`sentiment` 分布、`reviews_with_replies`、`reply_stats`（`merchant_replies_from_reply_api` / `merchant_replies_embedded_extra` / `reply_api_mainIds`）。**若 `reviews_with_replies=0` 会附带 `warning` 字段**——如该店实际有商家回复，说明抓取时没点开过评论详情页，完整回复未被记录。
+- **门店过滤（自动）**：评论 item 自带 `shopidencrypt` 门店标识，export 只保留**评论数最多的门店**，其余门店的评论自动丢弃。适用于"全部"tab 接口混入的相关店推荐、以及抓取期间浏览过其他店的情况。返回 JSON 的 `reply_stats` 含 `shops_detected` / `shop_name` / `foreign_reviews_dropped`；丢弃发生时会附带 `warning` 说明。
+- 返回 JSON 含：`rows`、`output`（绝对路径）、`sentiment` 分布、`reviews_with_replies`、`reply_stats`（`merchant_replies_from_reply_api` / `merchant_replies_embedded_extra` / `reply_api_mainIds` / `shops_detected` / `shop_name` / `foreign_reviews_dropped`）。**若 `reviews_with_replies=0` 会附带 `warning` 字段**——如该店实际有商家回复，说明抓取时没点开过评论详情页，完整回复未被记录。
 
 **export 成功后必做**：将返回 JSON 中 `output` 指向的 CSV 文件（computer:// 链接形式）随结果摘要一起发给用户，不要只报告统计数字。
 
@@ -136,5 +144,7 @@ export 的商家回复（store_feedback）自动合并两个来源，内容不�
 - exe 与 py 版本功能一致；py 版本要求 Python 3.11+ 且安装 mitmproxy、pywin32。
 - **isEnd 字段说明**：位于 `outsidesiftedreviewlist` 接口响应 JSON 的顶层，与 `list`/`startIndex`/`shopReviewCount` 平级。仅在真正翻到最后一页时为 `true`（实测丰裕 132 页仅末页为 true）。
 - **大评论量店铺**：`shopReviewCount` 上万的店铺（如光明村 3.4 万条）可能翻不到底，永远收不到 `isEnd=true`，此时靠停滞兜底/max-scroll 停止（status=`partial`）。建议开始抓取后看首屏返回的 `shop_review_count`，若评论量过大可提前用 `--target` 设上限或手动 Ctrl+C（数据仍有效）。
+- **动态滚动节奏（v2.4.0 起）**：单轮间隔与滚轮格数会随滚动轮数线性放大——经过 `--scroll-ramp` 轮后，间隔从 `--scroll-interval`(1.0s) 涨到 `--scroll-interval-max`、幅度从 `--scroll-clicks`(10) 涨到 `--scroll-clicks-max`。目的是给小程序深层滚动更多渲染缓冲、减少 DOM 累积导致的挂起，同时幅度加大以减少总轮数；权衡是越深越慢。
+- **自动调参（v2.5.0 起，v2.5.3 增强）**：capture 读接口报告的评论总数 `shopReviewCount`，据此自动推导 `--max-scroll` / `--scroll-ramp` / `--scroll-interval-max` / `--scroll-clicks-max`（**只有未显式传这些参数时才自动推导；显式传了以你为准**）。若**首屏**尚未返回总数（常出现，此时打 `auto-tune pending`），**滚动过程中一拿到 `shopReviewCount` 会立即补用**（打 `auto-tuned mid-scroll` 日志），滚动上限与节奏即随总数收紧/放宽；若该 tab 全程不回报总数（如"全部"tab），退用内置默认。开始抓取后可看日志确认这套节奏是否合适。
 - **pywin32 检查语义**：`pywin32` 检查的是**当前进程内** import（exe 已内置打包，任何机器都应通过；py 版则取决于运行解释器）。外部找到的 python 仅用于启动 mitmdump，**不需要** pywin32。
 - **`.pth` 桥接陷阱（已知问题）**：若机器上存在 venv 靠 `.pth` 把 site-packages 桥接给另一个解释器，纯 Python 包能桥接成功，但 pywin32 这类带原生 DLL 的包会"pip 显示已安装、实际 import 失败"（桥接目录里的 `pywin32.pth` 不会被 site.py 递归处理）。setup_env.ps1 已做防御：pip 安装后实测 import，失败则 `--force-reinstall --no-deps` 强制装入本解释器。根治方法是把 pywin32 直接装进实际使用的解释器本体，不用桥接。

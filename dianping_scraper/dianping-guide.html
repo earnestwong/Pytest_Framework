@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>大众点评评论抓取工具 · 使用说明</title>
+<style>
+@font-face {
+  font-family: "JetBrainsMono";
+  src: url("./_shared/fonts/JetBrainsMono-Regular.ttf") format("truetype");
+  font-weight: 400;
+}
+@font-face {
+  font-family: "JetBrainsMono";
+  src: url("./_shared/fonts/JetBrainsMono-Bold.ttf") format("truetype");
+  font-weight: 700;
+}
+
+:root {
+  --bg: #faf8f5;
+  --bg2: #ffffff;
+  --ink: #292524;
+  --muted: #7c756e;
+  --rule: #e8e3dc;
+  --accent: #e0552a;
+  --accent2: #1a7a4f;
+  --term-bg: #2b2724;
+  --term-ink: #f3efe9;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  font-size: 16px;
+  line-height: 1.75;
+  -webkit-font-smoothing: antialiased;
+}
+
+.page {
+  max-width: 840px;
+  margin: 0 auto;
+  padding: 0 28px 80px;
+}
+
+/* ---------- header ---------- */
+header {
+  padding: 72px 0 44px;
+  border-bottom: 1px solid var(--rule);
+  margin-bottom: 56px;
+}
+.kicker {
+  font-family: "JetBrainsMono", monospace;
+  font-size: 0.8rem;
+  letter-spacing: 0.12em;
+  color: var(--accent);
+  font-weight: 700;
+  margin-bottom: 14px;
+}
+h1 {
+  font-size: 2.1rem;
+  font-weight: 700;
+  line-height: 1.3;
+  letter-spacing: 0.01em;
+}
+.subtitle {
+  margin-top: 12px;
+  font-size: 1.05rem;
+  color: var(--muted);
+}
+.meta-row {
+  margin-top: 26px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.meta-chip {
+  font-size: 0.8rem;
+  color: var(--muted);
+  border: 1px solid var(--rule);
+  background: var(--bg2);
+  border-radius: 999px;
+  padding: 4px 14px;
+}
+.meta-chip b { color: var(--ink); font-weight: 600; }
+
+/* ---------- sections ---------- */
+section { margin-bottom: 64px; }
+
+.step-head {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  margin-bottom: 22px;
+}
+.step-num {
+  font-family: "JetBrainsMono", monospace;
+  font-size: 2rem;
+  font-weight: 700;
+  color: var(--accent);
+  line-height: 1;
+}
+h2 {
+  font-size: 1.4rem;
+  font-weight: 700;
+  line-height: 1.4;
+}
+h2 .tag {
+  display: inline-block;
+  vertical-align: 3px;
+  margin-left: 10px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--accent);
+  background: rgba(224, 85, 42, 0.09);
+  border: 1px solid rgba(224, 85, 42, 0.25);
+  border-radius: 4px;
+  padding: 2px 8px;
+  letter-spacing: 0.05em;
+}
+h2 .tag.green {
+  color: var(--accent2);
+  background: rgba(26, 122, 79, 0.08);
+  border-color: rgba(26, 122, 79, 0.25);
+}
+
+h3 {
+  font-size: 1.05rem;
+  font-weight: 600;
+  margin: 28px 0 12px;
+}
+
+p { margin-bottom: 14px; }
+p:last-child { margin-bottom: 0; }
+
+/* ---------- flow strip ---------- */
+.flow {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 14px;
+  margin: 8px 0 10px;
+}
+.flow-card {
+  background: var(--bg2);
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  padding: 18px 18px 16px;
+  position: relative;
+}
+.flow-card.hot { border-color: rgba(224, 85, 42, 0.45); }
+.flow-label {
+  font-family: "JetBrainsMono", monospace;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.flow-card.hot .flow-label { color: var(--accent); }
+.flow-title { font-size: 1rem; font-weight: 700; }
+.flow-desc { font-size: 0.83rem; color: var(--muted); margin-top: 4px; line-height: 1.6; }
+.flow-note {
+  text-align: center;
+  font-size: 0.82rem;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+.flow-note b { color: var(--accent); font-weight: 600; }
+
+/* ---------- terminal block ---------- */
+.term {
+  background: var(--term-bg);
+  color: var(--term-ink);
+  border-radius: 10px;
+  padding: 18px 22px;
+  margin: 16px 0;
+  overflow-x: auto;
+}
+.term-title {
+  font-size: 0.72rem;
+  color: #9b948c;
+  font-family: "JetBrainsMono", monospace;
+  letter-spacing: 0.08em;
+  margin-bottom: 10px;
+}
+.term code {
+  font-family: "JetBrainsMono", monospace;
+  font-size: 0.88rem;
+  line-height: 1.8;
+  white-space: nowrap;
+  display: block;
+}
+.term .cmt { color: #9b948c; }
+.term .arg { color: #f0a886; }
+.prompt { color: #8fc7a9; margin-right: 8px; }
+
+/* ---------- callouts ---------- */
+.callout {
+  border-left: 4px solid var(--accent);
+  background: var(--bg2);
+  border-radius: 0 8px 8px 0;
+  padding: 14px 18px;
+  margin: 18px 0;
+  font-size: 0.94rem;
+}
+.callout.green { border-left-color: var(--accent2); }
+.callout b { font-weight: 600; }
+.callout-title {
+  font-weight: 700;
+  font-size: 0.85rem;
+  letter-spacing: 0.04em;
+  margin-bottom: 4px;
+}
+.callout.warn .callout-title { color: var(--accent); }
+.callout.green .callout-title { color: var(--accent2); }
+
+/* ---------- timeline ---------- */
+.timeline {
+  margin: 20px 0 6px;
+  padding-left: 0;
+  list-style: none;
+}
+.timeline li {
+  position: relative;
+  padding: 0 0 22px 38px;
+  border-left: 2px solid var(--rule);
+  margin-left: 12px;
+}
+.timeline li:last-child { padding-bottom: 4px; border-left-color: transparent; }
+.timeline li::before {
+  content: "";
+  position: absolute;
+  left: -8px;
+  top: 5px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--bg);
+  border: 3px solid var(--accent);
+}
+.timeline li.done::before { border-color: var(--accent2); }
+.tl-head { font-weight: 600; font-size: 0.98rem; }
+.tl-body { font-size: 0.9rem; color: var(--muted); margin-top: 2px; line-height: 1.65; }
+.tl-body code {
+  font-family: "JetBrainsMono", monospace;
+  font-size: 0.82rem;
+  background: var(--bg);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+
+/* ---------- table ---------- */
+.table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  background: var(--bg2);
+  margin: 16px 0;
+}
+table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+th, td { text-align: left; padding: 12px 18px; vertical-align: top; }
+thead th {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--muted);
+  border-bottom: 1px solid var(--rule);
+  background: var(--bg);
+  white-space: nowrap;
+}
+tbody tr + td { border-top: none; }
+tbody tr { border-bottom: 1px solid var(--rule); }
+tbody tr:last-child { border-bottom: none; }
+td code {
+  font-family: "JetBrainsMono", monospace;
+  font-size: 0.82rem;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+/* ---------- Q&A ---------- */
+.qa {
+  background: var(--bg2);
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  padding: 18px 22px;
+  margin-bottom: 12px;
+}
+.qa .q {
+  font-weight: 600;
+  font-size: 0.98rem;
+  margin-bottom: 6px;
+}
+.qa .q::before { content: "问"; color: var(--accent); font-weight: 700; margin-right: 10px; }
+.qa .a { font-size: 0.92rem; color: var(--muted); }
+.qa .a::before { content: "答"; color: var(--accent2); font-weight: 700; margin-right: 10px; }
+.qa .a code {
+  font-family: "JetBrainsMono", monospace;
+  font-size: 0.82rem;
+  background: var(--bg);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 1px 6px;
+  color: var(--ink);
+}
+
+/* ---------- lists ---------- */
+ul.plain { padding-left: 20px; margin-bottom: 14px; }
+ul.plain li { margin-bottom: 6px; }
+ul.plain li::marker { color: var(--accent); }
+
+/* ---------- footer ---------- */
+footer {
+  border-top: 1px solid var(--rule);
+  margin-top: 72px;
+  padding-top: 28px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+footer .footer-note { max-width: 620px; }
+footer b { color: var(--ink); font-weight: 600; }
+
+/* ---------- responsive ---------- */
+@media (max-width: 640px) {
+  h1 { font-size: 1.6rem; }
+  .flow { grid-template-columns: 1fr; }
+  .page { padding: 0 18px 60px; }
+  header { padding-top: 48px; }
+  .step-num { font-size: 1.6rem; }
+}
+
+@media print {
+  body { background: #fff; }
+  .page { padding: 0; }
+  section { page-break-inside: avoid; }
+}
+</style>
+</head>
+<body>
+<div class="page">
+
+<header>
+  <div class="kicker">DIANPING SCRAPER GUIDE</div>
+  <h1>大众点评评论抓取工具 · 使用说明</h1>
+  <p class="subtitle">三步把一家门店的全部评论（含商家回复）变成一张 Excel 能直接打开的表格</p>
+  <div class="meta-row">
+    <span class="meta-chip">版本 <b>2.0.0</b></span>
+    <span class="meta-chip">平台 <b>Windows</b></span>
+    <span class="meta-chip">需要 <b>电脑版微信 + 大众点评小程序</b></span>
+    <span class="meta-chip">全程约 <b>10–30 分钟</b></span>
+  </div>
+</header>
+
+<!-- 01 what -->
+<section>
+  <div class="step-head">
+    <span class="step-num">01</span>
+    <h2>这个工具能做什么</h2>
+  </div>
+  <p>在电脑版微信里打开大众点评小程序，工具会一边自动翻动评论列表，一边把翻过的评论全部记录下来，最后整理成一张 CSV 表格。每条评论包含：评论人、日期、评分、人均消费、评论内容、情感分类（好评/中评/差评），以及<strong>商家的回复</strong>。</p>
+  <p>你只需要做一件事：在工具开始运行后，用鼠标在微信里把目标门店的评论列表页打开。剩下的滚动、记录、停止、恢复网络，全部自动完成。</p>
+</section>
+
+<!-- 02 before -->
+<section>
+  <div class="step-head">
+    <span class="step-num">02</span>
+    <h2>开始之前，确认两件事</h2>
+  </div>
+  <ul class="plain">
+    <li>这是一台 <strong>Windows 电脑</strong>，并且<strong>电脑版微信已登录</strong>，能在微信里打开大众点评小程序（搜「大众点评」即可）。</li>
+    <li>第一次在这台电脑上用，需要先由管理员运行一次 <code>dianping_scraper.exe</code> 同目录下的 <code>setup_env.ps1</code>（装 Python、抓包组件和证书，只需一次）。之后每次使用直接按下面三步走。</li>
+  </ul>
+  <div class="callout">
+    <div class="callout-title">怎么打开命令行</div>
+    打开 <code>dianping_scraper.exe</code> 所在的文件夹，点击顶部地址栏，输入 <b>cmd</b> 后回车——命令行窗口会直接停在这个目录，接下来所有命令都在这里输入。
+  </div>
+</section>
+
+<!-- 03 flow -->
+<section>
+  <div class="step-head">
+    <span class="step-num">03</span>
+    <h2>使用流程：三步走</h2>
+  </div>
+
+  <div class="flow">
+    <div class="flow-card">
+      <div class="flow-label">STEP 1</div>
+      <div class="flow-title">检查环境</div>
+      <div class="flow-desc">跑一条命令，5 项检查全部通过即可继续</div>
+    </div>
+    <div class="flow-card hot">
+      <div class="flow-label">STEP 2 · 需要你配合</div>
+      <div class="flow-title">抓取评论</div>
+      <div class="flow-desc">你打开评论列表页，工具自动滚动抓取</div>
+    </div>
+    <div class="flow-card">
+      <div class="flow-label">STEP 3</div>
+      <div class="flow-title">导出表格</div>
+      <div class="flow-desc">一条命令，得到 CSV 文件，Excel 直接打开</div>
+    </div>
+  </div>
+  <p class="flow-note">整个流程只有<b>第二步</b>需要人在场配合，其余两步各跑一条命令即可。</p>
+
+  <h3>第一步：检查环境</h3>
+  <div class="term">
+    <div class="term-title">命令行输入</div>
+    <code><span class="prompt">&gt;</span>dianping_scraper.exe check-env</code>
+  </div>
+  <p>会逐行检查 Python、抓包组件、证书等 5 项，每项显示 ok、最后一行 <code>ready : True</code> 就可以进入第二步；出现 NOT FOUND / MISSING 就找管理员重新运行 <code>setup_env.ps1</code>。</p>
+
+  <h3>第二步：抓取评论<span class="tag">人在场配合</span></h3>
+  <p>门店名随便写（用于显示），门店ID向需求方索取（它决定文件名，同一个店每次要用同一个ID）。命令跑起来之后，按下面的顺序操作：</p>
+  <div class="term">
+    <div class="term-title">命令行输入（示例：抓“丰裕(淮海店)”）</div>
+    <code><span class="prompt">&gt;</span>dianping_scraper.exe capture <span class="arg">"丰裕(淮海店)" 080501</span></code>
+    <code class="cmt">:: 门店ID 换成实际编号；默认一直抓到评论翻完为止</code>
+  </div>
+
+  <ul class="timeline">
+    <li>
+      <div class="tl-head">命令运行后，打开评论列表页</div>
+      <div class="tl-body">在电脑版微信进入大众点评小程序 → 搜索门店 → 点开门店 → 进入<b>评论列表页</b>（点「全部」或「最新」评论均可）。窗口会提示等待，<b>180 秒内</b>完成这一步，超时需重新运行命令。</div>
+    </li>
+    <li>
+      <div class="tl-head">进入列表页后，松手</div>
+      <div class="tl-body">工具检测到页面加载后会自动接管鼠标滚动，此时不要碰鼠标和键盘，等它翻完整个列表。期间命令行会显示进度（已抓条数）。</div>
+    </li>
+    <li>
+      <div class="tl-head">想要商家回复的「时间」？点开几条评论</div>
+      <div class="tl-body">商家回复的内容只滚列表就能全部抓到；但回复的<b>时间</b>只有在抓取期间点开几条带「商家回应」的评论详情页才能补上。不需要时间就可以完全不管。</div>
+    </li>
+    <li class="done">
+      <div class="tl-head">工具自动停止</div>
+      <div class="tl-body">翻到评论列表底部（或达到设定条数）会自动停止，并<b>自动恢复网络</b>。命令行显示 <code>capture finished</code> 即完成，数据保存在 <code>门店ID_capture.jsonl</code>。</div>
+    </li>
+  </ul>
+
+  <div class="callout warn">
+    <div class="callout-title">注意</div>
+    抓取期间工具会临时开启系统代理，结束时无论成功、失败还是中途按 <b>Ctrl+C</b>，都会自动关闭代理恢复网络，不需要手动处理。
+  </div>
+
+  <h3>第三步：导出表格<span class="tag green">全自动</span></h3>
+  <div class="term">
+    <div class="term-title">命令行输入（示例）</div>
+    <code><span class="prompt">&gt;</span>dianping_scraper.exe export <span class="arg">080501</span> --org-code <span class="arg">080501</span> --store-name <span class="arg">"丰裕(淮海店)"</span></code>
+    <code class="cmt">:: org-code 和 store-name 会写进表格，向需求方确认后填写</code>
+  </div>
+  <p>几秒钟完成，在当前文件夹生成 <code>080501_reviews.csv</code>，双击即可用 Excel 打开（已处理编码，不会乱码）。命令行最后会显示总条数和好评/中评/差评分布，可先核对一下再交付。</p>
+  <p class="note">导出时会自动按门店过滤：如果抓取过程中顺手看过别的店，那家店的评论会被自动剔除，只保留本次目标门店的数据，无需手工清理。</p>
+</section>
+
+<!-- 04 output -->
+<section>
+  <div class="step-head">
+    <span class="step-num">04</span>
+    <h2>导出的表格长什么样</h2>
+  </div>
+  <p>CSV 共 9 列，与数据库的评论表字段一一对应：</p>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>列名</th><th>含义</th><th>示例</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>org_code</code></td><td>机构编号（命令里指定的）</td><td>080501</td></tr>
+        <tr><td><code>store_name</code></td><td>门店名称</td><td>丰裕(淮海店)</td></tr>
+        <tr><td><code>username</code></td><td>评论人昵称</td><td>狂暴的虎</td></tr>
+        <tr><td><code>review_date</code></td><td>评论日期（相对时间已换算）</td><td>2026-08-18</td></tr>
+        <tr><td><code>rating</code></td><td>评分，0.0–5.0 星级<br>需要原始 0–50 星值时，导出加参数 <code>--rating-scale raw</code></td><td>4.0</td></tr>
+        <tr><td><code>price_per_person</code></td><td>人均消费（元）</td><td>35</td></tr>
+        <tr><td><code>content</code></td><td>评论正文</td><td>生煎很不错，汤汁多……</td></tr>
+        <tr><td><code>sentiment</code></td><td>情感分类：好评 / 中评 / 差评</td><td>好评</td></tr>
+        <tr><td><code>store_feedback</code></td><td>商家回复（多条用换行分隔，带回复时间时会标注日期）</td><td>[商家回应] 非常感谢您的好评……</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- 05 FAQ -->
+<section>
+  <div class="step-head">
+    <span class="step-num">05</span>
+    <h2>常见问题</h2>
+  </div>
+
+  <div class="qa">
+    <div class="q">中途想停下来怎么办？</div>
+    <div class="a">直接按 <code>Ctrl+C</code>。已经抓到的评论都会保留，不会白抓。</div>
+  </div>
+
+  <div class="qa">
+    <div class="q">一次没抓完，可以接着抓吗？</div>
+    <div class="a">可以。重新运行一遍 capture 命令（同一个门店ID），数据会接在上次之后继续追加，导出时自动去重。</div>
+  </div>
+
+  <div class="qa">
+    <div class="q">店的评论特别多（几万条），要抓很久怎么办？</div>
+    <div class="a">在命令后加 <code>--target 500</code>（数字自定），抓够指定条数就自动停。开始抓取后注意看首屏显示的评论总数，量大就提前设置上限。</div>
+  </div>
+
+  <div class="qa">
+    <div class="q">命令超时退出了，是什么问题？</div>
+    <div class="a">说明 180 秒内没有打开评论列表页。检查是否进错了页面（必须停在评论列表页，不是推荐菜或其他页面），然后重新运行命令再打开一次。</div>
+  </div>
+
+  <div class="qa">
+    <div class="q">跑完之后电脑上不了网了？</div>
+    <div class="a">工具正常结束会自动恢复网络；极少数情况下（如强制关机）代理可能残留，重启电脑即可恢复。日常使用不需要手动改任何网络设置。</div>
+  </div>
+
+  <div class="qa">
+    <div class="q">导出的表格里没有商家回复？</div>
+    <div class="a">商家回复来自评论列表本身，只滚列表就能抓全。如果确实一条都没有，先去大众点评页面确认这家店是否有「商家回应」；导出结果会附 warning 提示。</div>
+  </div>
+</section>
+
+<footer>
+  <p class="footer-note">本说明覆盖日常使用的完整流程。参数细节、接口格式与自动化调用规范见同目录的 <b>README_AGENT.md</b>；环境安装与重建见 <b>setup_env.ps1</b>。使用中遇到本文未覆盖的问题，请联系工具维护者。</p>
+</footer>
+
+</div>
+</body>
+</html>
