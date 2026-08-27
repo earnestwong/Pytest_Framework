@@ -40,26 +40,38 @@ class CSVExporter:
     _NOW_PAT = re.compile(r"^(刚刚|刚刚前)$")
 
     @staticmethod
+    def _content_for_hash(content: str) -> str:
+        """按 SQL hash_value 规则清洗内容后再参与 MD5(与 MySQL/SQL Server 同):
+          stage1 : 删除以“推荐：/推荐:”开头的整行(含其后中文,避免被保留进哈希)
+                  (正则 ^[\\s]*推荐[:：][^\\n]*$ ,MULTILINE 逐行匹配)
+          stage2 : 仅保留 ASCII字母数字与 CJK通用汉字(U+4E00–U+9FFF),其余全删
+        """
+        s = content or ""
+        # stage1: remove whole recommendation lines (推荐：/推荐:) incl. trailing text/newline
+        cleaned = re.sub(r"(?:^|\r?\n)\s*推荐[：:].*?(?=\r?\n|$)", "", s, flags=re.DOTALL)
+        # stage2: keep only ASCII alnum + Chinese CJK ideographs; strip everything else
+        return re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]", "", cleaned)
+
+    @staticmethod
     def hash_value(org_code: str, username: str, review_date: str, content: str) -> str:
-        """
-        记录唯一标识:MD5(CONCAT(org_code, '|', username, '|', review_date, '|', content))
-        小写 hex,utf-8 编码,与 MySQL store_reviews_negative.hash_value 同公式
-        """
+        """按 SQL hash_value 规则计算唯一标识:
+          MD5(CONCAT(org_code,'|',username,'|',review_date,'|',清洗后content))
+          小写 hex,utf-8 编码 —— 与 MySQL/SQL Server store_reviews_negative.hash_value 同公式"""
         s = "{}|{}|{}|{}".format(
             (org_code or "").strip(),
             (username or "").strip(),
             (review_date or "").strip(),
-            (content or "").strip(),
+            CSVExporter._content_for_hash(content),
         )
         return hashlib.md5(s.encode("utf-8")).hexdigest()
 
     @classmethod
     def card_hash(cls, org_code: str, card: Dict) -> str:
-        """计算卡片 hash(日期归一化后,与 CSV 行值一致)"""
+        """计算卡片唯一标识(日期归一化为 YYYY-MM-DD 后,与 CSV/DB/hash_value 三处一致)"""
         return cls.hash_value(
             org_code,
             card.get("user", ""),
-            cls._normalize_date(card.get("date", "") or ""),
+            cls._normalize_date(card.get("date") or ""),
             card.get("content", "") or "",
         )
 
