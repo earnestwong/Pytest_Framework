@@ -191,7 +191,7 @@ def sync_to_db(reviews: list) -> tuple:
         return (0, 0, 0)
 
     cur = conn.cursor()
-    table = "store_reviews_negative"
+    table = "store_reviews"
     inserted = updated = skipped = 0
 
     try:
