@@ -42,7 +42,7 @@ class CSVExporter:
     @staticmethod
     def _content_for_hash(content: str) -> str:
         """按 SQL hash_value 规则清洗内容后再参与 MD5(与 MySQL/SQL Server 同):
-          stage1 : 删除以“推荐：/推荐:”开头的整行(含其后中文,避免被保留进哈希)
+          stage1 : 删除以"推荐：/推荐:"开头的整行(含其后中文,避免被保留进哈希)
                   (正则 ^[\\s]*推荐[:：][^\\n]*$ ,MULTILINE 逐行匹配)
           stage2 : 仅保留 ASCII字母数字与 CJK通用汉字(U+4E00–U+9FFF),其余全删
         """
