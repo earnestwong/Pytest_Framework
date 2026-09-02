@@ -1222,6 +1222,13 @@ def main():
             print(f"  [商家回复] {len(cards_with_reply)} 条有商家回复,进入详情页获取回复日期")
             _, screen_h = adb.get_screen_size()
             y_max = int(screen_h * 0.90)
+            # 3d 处理中为露出屏外回复会做"正向"滚动(内容上移),使列表临时前移。
+            # 若不做补偿,该位移会与主循环 swipe_up 叠加,单次迭代列表前移可达~68%,
+            # 屏幕底部区间(3d滚动带进来的、仅被丢弃解析的那段)评价会在两次提交之间
+            # 被扫过却永远无法形成完整卡片落库,累计造成 2%-3% 稳态缺失。
+            # 这里累计净位移,3d 结束后回滚,使主循环翻屏保持一致的~38%步进。
+            _list_advance = 0  # 像素,>0 表示列表额外前移(需回滚),<0 表示后移
+            w2, h2 = adb.get_screen_size()
             for card in cards_with_reply:
                 dedup_key = summarizer._dedup_key(card)
                 # 先把 merchant_reply 内容同步到汇总卡片(不管日期能否取到),
@@ -1243,7 +1250,6 @@ def main():
                 #   正向(内容上移):回复被长内容/图片挤出屏幕底部下方(屏外)时露出
                 #     ——主场景,优先尝试(3c2补救只下滑8%,目标卡回复常在屏底下方)
                 #   反向(内容下移):回复被3c2补救下滑挤出屏幕顶部/导航区(y<16%,被过滤)时拉回
-                w2, h2 = adb.get_screen_size()
                 entered = False
                 reply_date = ""
                 detail_info = None
@@ -1253,9 +1259,13 @@ def main():
                         # 触发惯性滚动(惯性可能一次滚近一整屏,把目标卡片甩出屏幕)。
                         # forward=内容上移(向前滚),backward=内容下移(往回滚)
                         if scroll == "forward":
+                            # 正向:内容上移,列表前移约 30% 屏高
                             adb.swipe(w2 // 2, int(h2 * 0.70), w2 // 2, int(h2 * 0.40), duration_ms=900, human=False)
+                            _list_advance += int(h2 * 0.70) - int(h2 * 0.40)
                         else:
+                            # 反向:内容下移,列表回移约 35% 屏高(抵消正向)
                             adb.swipe(w2 // 2, int(h2 * 0.45), w2 // 2, int(h2 * 0.80), duration_ms=900, human=False)
+                            _list_advance -= int(h2 * 0.80) - int(h2 * 0.45)
                         adb.human_delay(1.0, 1.5)
                     fresh_xml = adb.dump_ui()
                     fresh_items = adb.extract_all_text(fresh_xml, min_len=1)
@@ -1310,6 +1320,30 @@ def main():
                     if summarizer._dedup_key(sc) == dedup_key:
                         sc["merchant_reply_date"] = reply_date
                         break
+
+            # 回滚 3d 处理造成的列表净位移,恢复主循环翻屏的基准位置。
+            # 仅在有实际位移时操作:位移>0 列表前移 → 手指下拽把内容拉回;反之同理。
+            # 避免累积前移把屏幕底部仅被"丢弃解析"的评价扫进未提交空隙而丢失。
+            if _list_advance:
+                _seg_dir = "down" if _list_advance > 0 else "up"
+                _D = abs(_list_advance)
+                print(f"  [商家回复] 3d处理使列表位移 {round(_list_advance / h2 * 100, 1)}%,回滚{_D}px 恢复基准位置")
+                while _D > 1:
+                    _seg = min(_D, int(h2 * 0.70))
+                    _half = _seg / 2.0
+                    _mid = h2 * 0.5
+                    if _seg_dir == "down":  # 内容下移(列表回移):手指向下拖(小y→大y)
+                        _sy = int(max(0, min(h2, _mid - _half)))
+                        _ey = int(max(0, min(h2, _mid + _half)))
+                    else:                    # 内容上移(列表前移):手指向上拖(大y→小y)
+                        _sy = int(max(0, min(h2, _mid + _half)))
+                        _ey = int(max(0, min(h2, _mid - _half)))
+                    if _sy == _ey or abs(_sy - _ey) < 2:
+                        break
+                    adb.swipe(w2 // 2, _sy, w2 // 2, _ey, duration_ms=800, human=False)
+                    _D -= _seg
+                    adb.human_delay(0.6, 1.0)
+
             # 处理回复后确认仍在评论列表(详情页back()可能改变页面状态)
             list_ok, xml_str = ensure_on_review_list(xml_str)
             if not list_ok:
