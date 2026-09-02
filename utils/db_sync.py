@@ -139,18 +139,26 @@ class ReviewDBSync:
                     skipped += 1
                     continue
                 # 有 feedback → 与已有行比 (store_feedback, store_feedback_date)
+                # 保护:本次未取到新日期(new_d 为空)时,沿用已有行的日期,避免覆盖清空已补采结果
+                keep_date = None
+                for row in rows:
+                    d = row[2].strftime("%Y-%m-%d") if row[2] else ""
+                    if d:
+                        keep_date = d
+                        break
+                new_d_eff = new_d or keep_date
                 need_update = False
                 for row in rows:
                     row_fb = (row[1] or "").strip()
                     row_d = row[2].strftime("%Y-%m-%d") if row[2] else ""
-                    if row_fb != new_fb or row_d != (new_d or ""):
+                    if row_fb != new_fb or row_d != new_d_eff:
                         need_update = True
                         break
                 if need_update:
                     cur.execute(
                         f"UPDATE {table} SET store_feedback=%s, store_feedback_date=%s "
                         "WHERE hash_value=%s",
-                        [new_fb, new_d, h],
+                        [new_fb, new_d_eff, h],
                     )
                     updated += 1
                 else:
