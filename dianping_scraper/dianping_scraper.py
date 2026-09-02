@@ -982,7 +982,11 @@ def parse_review_time(t):
         return today - timedelta(days=int(m.group(1)))
     m = re.match(r"^(\d+)(小时|分钟)前$", t)
     if m:
-        return today
+        # 与 collect_native 的 csv_exporter._normalize_date 对齐:精确扣除小时/分钟,
+        # 避免凌晨附近"N小时/分钟前"跨过午夜时被误归为今天(导致两脚本结果差一天)
+        n = int(m.group(1))
+        delta = timedelta(hours=n) if m.group(2) == "小时" else timedelta(minutes=n)
+        return (datetime.now() - delta).date()
     if "昨天" in t:
         return today - timedelta(days=1)
     if "前天" in t:
