@@ -342,30 +342,44 @@ class ADBHelper:
             if "验证" in text or "拖动滑块" in text:
                 hit_node = node
                 break
-        if not hit_node:
+        if hit_node is None:
             return None
         # 找到验证弹窗,尝试定位滑块(下半屏的可拖动元素)
         w, h = self.get_screen_size()
-        # 滑块通常在弹窗下半部,先用屏幕中下部作为搜索区域
-        slider_y_min = int(h * 0.55)
-        slider_y_max = int(h * 0.85)
-        # 在该区域找可点击节点(滑块通常 clickable=true)
         slider = None
+        # 优先: Yoda 滑块(阿里系验证码, WebView 渲染, 节点非 clickable)
+        #   yodaMoveingBar=滑块本体, yodaBoxWrapper=轨道区域
         for node in root.iter("node"):
-            clickable = node.attrib.get("clickable", "")
-            scrollable = node.attrib.get("scrollable", "")
+            rid = node.attrib.get("resource-id", "")
             bounds = node.attrib.get("bounds", "")
-            if not bounds:
+            if "yodaMoveingBar" not in rid or not bounds:
                 continue
             coords = bounds.replace("][", ",").strip("[]").split(",")
             if len(coords) != 4:
                 continue
             x1, y1, x2, y2 = map(int, coords)
-            cy = (y1 + y2) // 2
-            if slider_y_min <= cy <= slider_y_max and (clickable == "true" or scrollable == "true"):
-                # 选最靠左的(滑块起始于左侧)
-                if slider is None or x1 < slider["x1"]:
-                    slider = {"x1": x1, "y1": y1, "x2": x2, "y2": y2, "cx": (x1 + x2) // 2, "cy": cy}
+            slider = {"x1": x1, "y1": y1, "x2": x2, "y2": y2,
+                      "cx": (x1 + x2) // 2, "cy": (y1 + y2) // 2}
+            break
+        if slider is None:
+            # 常规滑块: 在屏幕中下部(0.45h-0.85h)找可点击/可滚动节点
+            slider_y_min = int(h * 0.45)
+            slider_y_max = int(h * 0.85)
+            for node in root.iter("node"):
+                clickable = node.attrib.get("clickable", "")
+                scrollable = node.attrib.get("scrollable", "")
+                bounds = node.attrib.get("bounds", "")
+                if not bounds:
+                    continue
+                coords = bounds.replace("][", ",").strip("[]").split(",")
+                if len(coords) != 4:
+                    continue
+                x1, y1, x2, y2 = map(int, coords)
+                cy = (y1 + y2) // 2
+                if slider_y_min <= cy <= slider_y_max and (clickable == "true" or scrollable == "true"):
+                    # 选最靠左的(滑块起始于左侧)
+                    if slider is None or x1 < slider["x1"]:
+                        slider = {"x1": x1, "y1": y1, "x2": x2, "y2": y2, "cx": (x1 + x2) // 2, "cy": cy}
         return {
             "hint": (hit_node.attrib.get("text", "") or hit_node.attrib.get("content-desc", "")).strip(),
             "slider": slider,
@@ -395,13 +409,32 @@ class ADBHelper:
             x1 = int(w * 0.15)
             y = int(h * 0.72)
             x2 = int(w * 0.85)
-        # 慢速水平滑动(模拟人手拖动,800-1000ms)
-        duration = random.randint(800, 1000)
-        # 加轻微 Y 抖动
-        y1 = y + random.randint(-5, 5)
-        y2 = y + random.randint(-5, 5)
-        print(f"  [验证] 检测到验证弹窗[{info['hint'][:20]}],尝试滑动 ({x1},{y1})->({x2},{y2}) {duration}ms")
-        self.shell(f"input swipe {x1} {y1} {x2} {y2} {duration}")
+        # 分多段滑动模拟人类拖动轨迹(快速起步->中段匀速->末端减速停顿),
+        # 单次匀速 input swipe 易被风控判定为机器操作
+        total_dist = x2 - x1
+        # 分段比例: 起步加速 10% 短、中段 60% 快、末端 30% 慢(带停顿)
+        segments = [
+            (0.05, 120),  # (占全程比例, 该段滑动时长 ms) 起步快
+            (0.10, 140),
+            (0.25, 260),  # 中段
+            (0.25, 240),
+            (0.20, 300),  # 末端减速
+            (0.15, 380),
+        ]
+        # 归一化比例(可能不精确等于1)
+        seg_sum = sum(s[0] for s in segments)
+        cur_x = x1
+        cur_y = y + random.randint(-3, 3)
+        print(f"  [验证] 检测到验证弹窗[{info['hint'][:20]}],"
+              f"分段滑动 ({x1},{y})->({x2},{y})")
+        for ratio, dur in segments:
+            nx = x1 + int(total_dist * (ratio / seg_sum))
+            ny = cur_y + random.randint(-4, 4)  # 每段轻微 Y 抖动
+            self.shell(f"input swipe {cur_x} {cur_y} {nx} {ny} {dur}")
+            cur_x = nx
+            cur_y = ny
+        # 末端停顿后释放(模拟按住思考)
+        time.sleep(random.uniform(0.3, 0.6))
         # 滑动后等待验证结果
         time.sleep(random.uniform(2.0, 3.5))
         return True
@@ -691,6 +724,9 @@ class ADBHelper:
             # 发布时间而用户名仍在屏外,若不排除会被误当作用户名,
             # 导致复合身份校验误判"用户名不同"而放弃(实际是没滚到位)
             if text.startswith("发布于"):
+                continue
+            # 店铺人均价格节点(如"¥20/人")会出现在详情页顶部,非用户名
+            if re.search(r"[¥￥]", text) or "人均" in text or re.search(r"/\s*人\s*$", text):
                 continue
             if len(text) > 20:  # 用户名不会太长(可能是正文等)
                 continue
