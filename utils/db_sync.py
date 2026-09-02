@@ -66,6 +66,31 @@ class ReviewDBSync:
         """试连接;可用 True,不可用 False(已标记禁用)"""
         return self._connect()
 
+    def get_latest_review_date(self, org_code: str):
+        """
+        查询 org_code 下 review_date 倒序最新的一条记录日期(YYYY-MM-DD)。
+        用于增量采集:采集开始前取库内最新评论日期,边界停止日期 = 该值 - 1 天。
+        表内无记录或查询失败返回 None(调用方应回退为全量采集)。
+        """
+        if not self._connect():
+            return None
+        table = self.cfg.get("table", "store_reviews_negative")
+        try:
+            cur = self._conn.cursor()
+            cur.execute(
+                f"SELECT review_date FROM {table} "
+                "WHERE org_code=%s AND review_date IS NOT NULL "
+                "ORDER BY review_date DESC LIMIT 1",
+                (org_code,),
+            )
+            row = cur.fetchone()
+            if row and row[0]:
+                return row[0].strftime("%Y-%m-%d") if hasattr(row[0], "strftime") else str(row[0])
+            return None
+        except Exception as e:
+            print(f"[DB] 查询 {org_code} 最新 review_date 失败: {e}")
+            return None
+
     def sync_cards(self, cards: List[Dict], org_code: str, shop_name: str) -> Tuple[int, int, int]:
         """
         批量同步卡片:新记录插入,feedback 变化的重复记录更新
