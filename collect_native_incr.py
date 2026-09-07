@@ -3,10 +3,13 @@
 基于 collect_native.py,新增增量停止逻辑:
   1. 采集开始前查询 store_reviews_negative 表中该 org_code 的
      review_date 倒序最新记录日期;
-  2. 从差评列表顶部(最新)往下滚动采集新评论;
-  3. 屏幕上一旦出现 review_date ≤ (库内最新日期 - 1day) 的评论,
-     判定已达增量边界,保存当前结果并停止,避免重复采集更早的旧评论。
-     (留 1 天重叠,覆盖最新日期当天因 ±1 天归一化差异可能漏采的边界记录,见 CSVExporter._normalize_date)
+  2. 从差评列表顶部(最新)往下滚动采集;
+  3. 屏幕上一旦出现 review_date ≤ (库内最新日期 - 30天) 的评论,
+     判定已达增量边界,保存当前结果并停止,不再向下采更早的旧评论。
+     (边界放宽到 30 天,实现两个目标:
+      a. 增量新纪录补录: 采集库内最新日期之后出现的新评论;
+      b. 近一月记录跟踪: 滚动覆盖最近一月已入库的评论,期间若有新出现的商家回复,
+         仍会进详情页补采商家回复内容及回复日期并回写(DB 按 hash 去重,老记录自动跳过)。)
 
 用法:
     python collect_native_incr.py --shop "光明邨大酒家(淮海路店)" --org-code "0801"
@@ -146,16 +149,19 @@ def main():
         print("[DB] 连接不可用(外网?),本次仅输出 CSV/JSON")
 
     # [增量] 采集开始前查询该 org_code 在库的最大 review_date,计算停止边界日期。
-    # 差评列表按最新到最旧排列,从顶部往下采集新评论,直到在屏幕上遇到边界日期评论即停。
-    # 边界 = 库内最新日期 - 1day:留出 1 天重叠,覆盖最新日期当天可能因相对时间(如
-    # "N小时前")±1 天归一化差异而漏采的边界记录。DB 不可用/无记录/--no-incr 时全量采集。
+    # 差评列表按最新到最旧排列,从顶部往下采集,直到在屏幕上遇到 ≤ 边界日期评论即停。
+    # 边界 = 库内最新日期 - 30天:既补录最新日期之后新增的新评论,又覆盖最近一月
+    # 已入库评论以跟踪补采新出现的商家回复及回复日期。老记录靠 DB hash 去重跳过。
+    # DB 不可用/无记录/--no-incr 时全量采集。
+    INCR_LOOKBACK_DAYS = 30  # 边界回看天数:最新之后新纪录补录 + 近一月商家回复跟踪
     stop_date = ""
     if db_sync is not None and not args.no_incr:
         from datetime import datetime as _dt, timedelta as _td
         _latest = db_sync.get_latest_review_date(args.org_code)
         if _latest:
-            stop_date = (_dt.strptime(_latest, "%Y-%m-%d") - _td(days=1)).strftime("%Y-%m-%d")
-            print(f"  [增量] 库内 {args.org_code} 最新 review_date: {_latest},停止边界日期: {stop_date}")
+            stop_date = (_dt.strptime(_latest, "%Y-%m-%d") - _td(days=INCR_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
+            print(f"  [增量] 库内 {args.org_code} 最新 review_date: {_latest},"
+                  f"停止边界日期(最新-{INCR_LOOKBACK_DAYS}天): {stop_date}")
         else:
             print("  [增量] 库内无该 org_code 记录或查询失败,无法按边界停止,将全量采集")
     else:
