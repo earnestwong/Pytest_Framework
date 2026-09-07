@@ -798,6 +798,7 @@ class ADBHelper:
 
         # 内容扫描起点:用户名和日期节点中较后者之后
         start_idx = max(user_idx, date_idx) + 1
+        content_parts = []  # 内容区多个长文本节点拼接(详情页正文常分段,取完整全文供折叠残片回写)
         for i in range(start_idx, len(items)):
             text = items[i]["text"]
             # 跳过用户名/日期节点本身
@@ -831,13 +832,18 @@ class ADBHelper:
             # 遇到商家标签 → 已到商家回复区,停止搜索
             if "（商家）" in text or "(商家)" in text:
                 break
-            # 找到第一个长文本节点作为内容前缀(>8字,过滤短标签)
+            # 长文本节点(>8字)即评论正文内容段,记入完整正文
             if len(text) >= 8:
                 # 去除对象占位符 ￼(U+FFFC) 等不可见字符
-                content_prefix = re.sub(r"[\uFFFC\uFFFD]", "", text).strip()
-                break
+                t = re.sub(r"[\uFFFC\uFFFD]", "", text).strip()
+                if t:
+                    content_parts.append(t)
 
+        # 完整正文 = 内容区各文本节点拼接;前缀 = 首个长文本节点(用于跨屏匹配)
+        content_full = "\n".join(content_parts).strip()
+        content_prefix = content_parts[0] if content_parts else ""
         return {"user": user, "date": date, "score": score,
+                "content_full": content_full,
                 "content_prefix": content_prefix}
 
     # ---------- 截图 ----------

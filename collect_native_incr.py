@@ -411,6 +411,25 @@ def main():
                     if not list_ok:
                         print(f"  [商家回复] back()后评论列表状态丢失,恢复失败")
                     continue
+            # 方案B: 复用进入详情页的机会,顺带补全折叠残片正文。
+            # 列表页长评论折叠时只抓到"短正文…推荐:xx"截断(残片),hash 与完整版不同,
+            # 跨批次会误判为新记录。详情页正文是完整全文,身份证明确认同人后回写,
+            # 使 hash 与库中完整版一致,从源头避免折叠/完整两条记录重复。
+            if card is not None:
+                c_cur = (card.get("content") or "")
+                dc_full = (detail_info or {}).get("content_full") or ""
+                _folded = (c_cur.endswith("…") or c_cur.endswith("...")) and ("推荐：" in c_cur or "推荐:" in c_cur)
+                _cf_h = CSVExporter._content_for_hash(c_cur)   # 清洗后残片=正文前N字
+                _df_h = CSVExporter._content_for_hash(dc_full)  # 清洗后完整全文
+                if (_folded and len(_df_h) > len(_cf_h)
+                        and _cf_h[:15] and _cf_h in _df_h):
+                    card["content"] = dc_full
+                    print(f"  [补全] 折叠残片已用详情页完整正文回写(列表{len(c_cur)}字→详情{len(dc_full)}字): [{card.get('user')}] {card.get('date')}")
+                    # 同步本地卡片内容到汇总卡片(dedup 后本地副本会被丢弃,必须回写)
+                    for _sc in summarizer.cards:
+                        if summarizer._dedup_key(_sc) == summarizer._dedup_key(card):
+                            _sc["content"] = dc_full
+                            break
             if not reply_date:
                 reply_date = adb.extract_merchant_reply_date(detail_xml)
             w, h = adb.get_screen_size()

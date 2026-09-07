@@ -141,6 +141,45 @@ class ReviewDBSync:
                 new_d = _to_date(CSVExporter._normalize_date((c.get("merchant_reply_date") or "") or ""))
                 rows = existing.get(h, [])
                 if not rows:
+                    # 防重兜底(跨批次):同 (org_code, username, review_date) 且正文互为子串
+                    # 时,说明两者是同一评论的"折叠残片/完整版",hash 因内容完整度不同而不一致
+                    # (折叠版结尾常带省略号+“推荐:xx行”,清洗后与完整版正文不同)。
+                    # 旧行内容更长=已存完整版 → 本次残片跳过,防止重复入库;
+                    # 本次内容更长=疑似完整版 → 删除旧残片再插入,收敛为一条并保留最新完整正文。
+                    _u = (c.get("user") or "").strip()
+                    _d = _to_date(CSVExporter._normalize_date((c.get("date") or "") or ""))
+                    if _u and _d:
+                        _new_c = (c.get("content") or "")
+                        try:
+                            cur.execute(
+                                "SELECT hash_value, content FROM " + table +
+                                " WHERE org_code=%s AND username=%s AND review_date=%s "
+                                "AND hash_value<>%s LIMIT 1",
+                                [org_code, _u, _d, h],
+                            )
+                            _row = cur.fetchone()
+                            if _row is not None:
+                                _oc = (_row[1] or "")
+                                # 用清洗后内容(去"推荐:xx"行/符号,CJK+字母数字)比较互为子串:
+                                # 折叠残片清洗后=正文前N字,完整版清洗后=全文,
+                                # 残片清洗必为完整版清洗的子串(原始文本因省略号/推荐行不是子串)。
+                                _nc2 = CSVExporter._content_for_hash(_new_c)
+                                _ocl = CSVExporter._content_for_hash(_oc)
+                                if _ocl and _nc2 and (_ocl in _nc2 or _nc2 in _ocl):
+                                    # 互为子串 → 同一评论不同完整度
+                                    if len(_oc) >= len(_new_c):
+                                        # 库中已是完整版(更长),本次残片跳过
+                                        print(f"  [DB] 折叠残片跳过(库中已有完整版): user={_u} date={_d} len {len(_new_c)}->{len(_oc)}")
+                                        skipped += 1
+                                        continue
+                                    # 本次是完整版,旧残片删除后插入新完整版
+                                    cur.execute(
+                                        "DELETE FROM " + table + " WHERE hash_value=%s",
+                                        [_row[0]],
+                                    )
+                                    print(f"  [DB] 删除旧折叠残片,改用本次完整版: user={_u} date={_d} len {len(_oc)}->{len(_new_c)}")
+                        except Exception:
+                            pass  # 防重兜底失败不影响主流程
                     cur.execute(
                         "INSERT INTO " + table +
                         " (org_code, store_name, username, review_date, rating, "
