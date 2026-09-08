@@ -216,16 +216,24 @@ class ADBHelper:
                 encoding="utf-8",
                 errors="ignore",
             )
-            # dump 命令忽略退出码(uiautomator dump 即使成功也可能返回非零)
-            subprocess.run(
-                self._base_cmd + ["shell", f"uiautomator dump {remote}"],
-                capture_output=True,
-                text=True,
-                timeout=60,
-                encoding="utf-8",
-                errors="ignore",
-            )
-            time.sleep(1.0)
+            # dump 命令忽略退出码(uiautomator dump 即使成功也可能返回非零)。
+            # 页面有持续动画时 uiautomator 会一直等 idle, 命令阻塞到超时; 此处
+            # 超时即判定失败(正常页 1-2s 即完成, 动画页再等也无谓), 交由外层
+            # (pkill后重试 / 调用方下滑)恢复。
+            try:
+                subprocess.run(
+                    self._base_cmd + ["shell", f"uiautomator dump {remote}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    encoding="utf-8",
+                    errors="ignore",
+                )
+            except subprocess.TimeoutExpired:
+                # 动画页 uiautomator 阻塞到超时: 视为本次 dump 失败, 交由
+                # 外层(pkill后重试 / 调用方下滑)恢复, 不再抛出逃逸外层。
+                pass
+            time.sleep(0.3)
             # 读取文件内容(文件不存在则 cat 返回空,触发重试)
             cat = subprocess.run(
                 self._base_cmd + ["shell", f"cat {remote}"],
@@ -252,7 +260,7 @@ class ADBHelper:
                 )
             except Exception:
                 pass
-            time.sleep(3.0)
+            time.sleep(0.8)
         raise RuntimeError(f"uiautomator dump 失败(重试 {retries} 次): {last_err}")
 
     def find_elements_by_text(self, xml_str: str, text: str) -> List[Dict]:
