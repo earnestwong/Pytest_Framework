@@ -581,9 +581,10 @@ class ADBHelper:
     _MERCHANT_REPLY_DATE_ONLY_PAT = re.compile(
         r'^(\d{4}年\d{1,2}月\d{1,2}日|\d{1,2}月\d{1,2}日|\d{4}[-/.]\d{1,2}[-/.]\d{1,2})$'
     )
-    # 商家回复日期(24小时内相对时间):如"3分钟前"/"2小时前"/"刚刚",由调用方换算成今天日期
+    # 商家回复日期(24小时内相对时间):如"3分钟前"/"2小时前"/"1天前"/"刚刚",由调用方换算成今天日期
+    # 注: "1天前/2天前" 也在此类(APP 超过24小时回复显示"N天前"), 必须单独匹配
     _MERCHANT_REPLY_REL_PAT = re.compile(
-        r'^(\d+\s*分钟前|\d+\s*小时前|刚刚|昨天|前天)$'
+        r'^(\d+\s*分钟前|\d+\s*小时前|\d+\s*天前|刚刚|昨天|前天)$'
     )
 
     def extract_merchant_reply_date(self, xml_str: str) -> str:
@@ -720,6 +721,11 @@ class ADBHelper:
                 break  # 已超出顶部区域(节点按y升序),未找到用户名
             text = it["text"]
             if text in self._DETAIL_TOP_NOISE:
+                continue
+            # 评分档位("很差/较差/很糟糕/好评"等)非用户名。
+            # 直点回复节点进详情页时自动定位到回复区,屏幕顶部可能出现评分节点,
+            # 若不排除会被误当作用户名,导致复合身份校验误判"用户名不同"而放弃取日期
+            if text in self._DETAIL_SCORE_TEXTS:
                 continue
             # 输入框占位符(如"说点什么吧~"/"发条友善评论吧～")非用户名
             if "评论吧" in text or "说点什么" in text:

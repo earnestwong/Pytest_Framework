@@ -152,10 +152,11 @@ class ReviewDBSync:
                         _new_c = (c.get("content") or "")
                         try:
                             cur.execute(
-                                "SELECT hash_value, content FROM " + table +
-                                " WHERE org_code=%s AND username=%s AND review_date=%s "
-                                "AND hash_value<>%s LIMIT 1",
-                                [org_code, _u, _d, h],
+                                "SELECT hash_value, content, store_feedback, store_feedback_date FROM " + table +
+                                " WHERE org_code=%s AND username=%s AND hash_value<>%s "
+                                "AND review_date BETWEEN DATE_SUB(%s, INTERVAL 1 DAY) "
+                                "AND DATE_ADD(%s, INTERVAL 1 DAY) LIMIT 1",
+                                [org_code, _u, h, _d, _d],
                             )
                             _row = cur.fetchone()
                             if _row is not None:
@@ -163,14 +164,29 @@ class ReviewDBSync:
                                 # 用清洗后内容(去"推荐:xx"行/符号,CJK+字母数字)比较互为子串:
                                 # 折叠残片清洗后=正文前N字,完整版清洗后=全文,
                                 # 残片清洗必为完整版清洗的子串(原始文本因省略号/推荐行不是子串)。
+                                # review_date 允许 ±1 天:同一评论跨天重采时,相对时间
+                                # (昨天/今天/N天前)会被归一化出差1天的日期而得出不同 hash,
+                                # 若不兜底会二次插入(如 成坚食品 09-06/09-07 重复行)。
+                                # 匿名用户判别弱:username 恒为"匿名用户",±1 天内可能正好有
+                                # 两条不同的匿名评论且正文互为子串,若也用子串放宽会误合并甚至
+                                # 删掉其中一条(数据丢失)。故匿名用户改为要求清洗后内容【完全相等】,
+                                # 同一条跨天重采内容必然一致仍可正确合并,不同评论则天然放行。
+                                _anon = "匿名" in _u
                                 _nc2 = CSVExporter._content_for_hash(_new_c)
                                 _ocl = CSVExporter._content_for_hash(_oc)
-                                if _ocl and _nc2 and (_ocl in _nc2 or _nc2 in _ocl):
-                                    # 互为子串 → 同一评论不同完整度
+                                _match = _nc2 == _ocl if _anon else (_ocl in _nc2 or _nc2 in _ocl)
+                                if _ocl and _nc2 and _match:
                                     if len(_oc) >= len(_new_c):
-                                        # 库中已是完整版(更长),本次残片跳过
-                                        print(f"  [DB] 折叠残片跳过(库中已有完整版): user={_u} date={_d} len {len(_new_c)}->{len(_oc)}")
-                                        skipped += 1
+                                        # 库中已有同一评论(完整度不低于本次): 更新合并, 不新插
+                                        _fb_ex = (_row[2] or "").strip()
+                                        print(f"  [DB] 同源评论去重(库中已有,更新合并): user={_u} date≈{_d} len {len(_new_c)}->{len(_oc)}")
+                                        cur.execute(
+                                            "UPDATE " + table + " SET review_date=%s, content=%s, "
+                                            "store_feedback=%s, store_feedback_date=%s WHERE hash_value=%s",
+                                            [_d, _new_c or _oc, (new_fb or _fb_ex) or None,
+                                             (new_d or _row[3]), _row[0]],
+                                        )
+                                        updated += 1
                                         continue
                                     # 本次是完整版,旧残片删除后插入新完整版
                                     cur.execute(

@@ -89,6 +89,10 @@ def parse_args():
                    help="不同步数据库(仅输出 CSV/JSON)")
     p.add_argument("--no-incr", action="store_true",
                    help="禁用增量边界停止(不查询库内最新日期,全量采集)")
+    p.add_argument("--cutoff-days", type=int, default=0,
+                   help="固定时间窗天数:>0 时用『今天-该天数』作为停止边界"
+                        "(如 60=只采集最近 60 天差评,与 DB 状态无关);"
+                        "0=沿用增量边界(库内最新 review_date - 30 天)")
     return p.parse_args()
 
 
@@ -155,8 +159,15 @@ def main():
     # DB 不可用/无记录/--no-incr 时全量采集。
     INCR_LOOKBACK_DAYS = 30  # 边界回看天数:最新之后新纪录补录 + 近一月商家回复跟踪
     stop_date = ""
-    if db_sync is not None and not args.no_incr:
-        from datetime import datetime as _dt, timedelta as _td
+    from datetime import datetime as _dt, timedelta as _td
+    if args.cutoff_days and args.cutoff_days > 0:
+        # 固定时间窗:采集最近 cutoff_days 天(今天-该天数),与 DB 最新日期无关。
+        # 从差评列表顶部(最新)往下采集,遇到 review_date < 该边界日期的旧评论即停
+        # (停止判定沿用下方 'date <= stop_date' 的既有逻辑)。
+        stop_date = (_dt.now() - _td(days=args.cutoff_days)).strftime("%Y-%m-%d")
+        print(f"  [增量] 固定时间窗: 采集最近 {args.cutoff_days} 天,"
+              f"停止边界日期(review_date < {stop_date} 即停): {stop_date}")
+    elif db_sync is not None and not args.no_incr:
         _latest = db_sync.get_latest_review_date(args.org_code)
         if _latest:
             stop_date = (_dt.strptime(_latest, "%Y-%m-%d") - _td(days=INCR_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
