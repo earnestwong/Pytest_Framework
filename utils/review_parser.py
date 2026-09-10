@@ -245,16 +245,21 @@ class ReviewParser:
                 # 把下一张卡片用户名误并入当前 content(如"毛小贼"被并入上一条 content 末尾)
                 if card["merchant_reply"]:
                     break
-                # 向后看最多3个节点,只要遇到日期就认定是下一卡片锚点
+                # 向后看最多3个节点,只要遇到日期/签名/评分就认定是下一卡片锚点
                 # 关键:用户名后紧跟签名"发布过X条..."也是卡片头部特征——
                 # 长评论(内容+图片+回复接近一屏)跨屏时,用户名露在屏幕底部,
                 # 日期/评分/内容在屏外看不到,仅凭"用户名+签名"组合即可判定
                 # 这是新卡片边界,否则用户名会被吞进上一条评论内容(丢用户)
-                hit_date = False
+                # 追加评分(SCORE_TEXTS)为头部特征:正常卡结构"用户名→评分"两节点相邻,
+                # 本卡评分已被消费(score_found),若某用户名候选后紧跟评分节点,几乎必是
+                # 下一张卡的头部,应判为新卡边界。修复:折叠长评论无商家回复在屏内时,
+                # 下一卡"用户名(讲话呢)+评分(超预期)"被误并入本卡 content 的污染。
+                hit_header = False
                 for k in range(1, min(4, len(items) - j)):
                     nxt = items[j + k]["text"]
-                    if self.DATE_PAT.match(nxt) or self.USER_SIG_PAT.match(nxt):
-                        hit_date = True
+                    if (self.DATE_PAT.match(nxt) or self.USER_SIG_PAT.match(nxt)
+                            or nxt in self.SCORE_TEXTS):
+                        hit_header = True
                         break
                     # 遇到非签名/非图片标签的其他用户名候选,放弃(可能是内容里的专有名词)
                     if (not self.UI_NOISE_PAT.match(nxt)
@@ -262,8 +267,14 @@ class ReviewParser:
                             and nxt not in self.SCORE_TEXTS
                             and not self.MERCHANT_PAT.match(nxt)):
                         break
-                if hit_date:
+                if hit_header:
                     break
+            # 折叠保护:长评论在列表页折叠时,最后一条可见内容以省略号(…/…)结尾,
+            # 其后节点不再属于本卡正文(商家回复在 MERCHANT_PAT 分支已单独处理,不受影响)。
+            # 若不在此截断,把下一卡的用户名/评分等噪声并入折叠残片,会让 hash 与详情页
+            # 完整版不一致,进而击穿 DB 子串去重,产生"同评论不同 hash"的重复记录。
+            if card["content"].rstrip().endswith(("…", "...")):
+                continue
             if card["content"]:
                 card["content"] += "\n" + text
             else:

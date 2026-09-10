@@ -423,17 +423,26 @@ def main():
                         print(f"  [商家回复] back()后评论列表状态丢失,恢复失败")
                     continue
             # 方案B: 复用进入详情页的机会,顺带补全折叠残片正文。
-            # 列表页长评论折叠时只抓到"短正文…推荐:xx"截断(残片),hash 与完整版不同,
+            # 列表页长评论折叠时只抓到"短正文…"截断(残片),hash 与完整版不同,
             # 跨批次会误判为新记录。详情页正文是完整全文,身份证明确认同人后回写,
             # 使 hash 与库中完整版一致,从源头避免折叠/完整两条记录重复。
             if card is not None:
                 c_cur = (card.get("content") or "")
                 dc_full = (detail_info or {}).get("content_full") or ""
-                _folded = (c_cur.endswith("…") or c_cur.endswith("...")) and ("推荐：" in c_cur or "推荐:" in c_cur)
-                _cf_h = CSVExporter._content_for_hash(c_cur)   # 清洗后残片=正文前N字
-                _df_h = CSVExporter._content_for_hash(dc_full)  # 清洗后完整全文
-                if (_folded and len(_df_h) > len(_cf_h)
-                        and _cf_h[:15] and _cf_h in _df_h):
+                # 折叠判定放开:不再要求内容必须含"推荐："行(纯菜品/纯文字长评论无此节,
+                # 宽松要求会漏判,使折叠残片 hash 与完整版不一致而重复入库)。
+                # 以首个省略号(…/...)为折叠点;其前的正文为残片片段,其后(含误并的下一卡
+                # 用户名/评分等噪声)不再参与哈希。
+                _fold_idx = min([i for i in (c_cur.find("…"), c_cur.find("...")) if i >= 0] or [-1])
+                _folded = _fold_idx >= 0
+                _cf_h = CSVExporter._content_for_hash(c_cur[:_fold_idx] if _folded else c_cur)
+                _df_h = CSVExporter._content_for_hash(dc_full)
+                # 护栏:残片清洗后是完整版清洗后的前缀(前8字)且残片更短才回写。
+                # 不做整串子串要求:列表折叠可能中途截字(如"大部分时候"→"大部分时间"),
+                # 整串子串会误判漏回写,导致 hash 不一致而重复入库。详情页身份此前已通过
+                # _composite_match,残片必属于该完整版,前缀护栏足以避免错配。
+                if (_folded and dc_full and len(_df_h) > len(_cf_h)
+                        and _cf_h[:8] and _df_h.startswith(_cf_h[:8])):
                     card["content"] = dc_full
                     print(f"  [补全] 折叠残片已用详情页完整正文回写(列表{len(c_cur)}字→详情{len(dc_full)}字): [{card.get('user')}] {card.get('date')}")
                     # 同步本地卡片内容到汇总卡片(dedup 后本地副本会被丢弃,必须回写)
